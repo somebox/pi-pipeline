@@ -204,9 +204,9 @@ export default function (pi: ExtensionAPI) {
 					mode: plan.mode,
 					effort: plan.effort,
 					stepCount: plan.steps.length,
-					tiers: plan.steps.reduce(
+					agents: plan.steps.reduce(
 						(acc, s) => {
-							acc[s.tier] = (acc[s.tier] ?? 0) + 1;
+							acc[s.agent] = (acc[s.agent] ?? 0) + 1;
 							return acc;
 						},
 						{} as Record<string, number>,

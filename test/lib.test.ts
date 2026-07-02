@@ -21,6 +21,8 @@ import {
 	summarizeCost, buildPlan, mapResultEntry, rollupByModel, renderCostReport,
 	loadTierModels, loadModelFallbackOverrides, fallbacksFor, isTierAgent,
 	injectTierModels, buildCostStep, newReport,
+	toRunMetrics, metricsByModel, metricsTotalCost, metricsTotalDurationMs,
+	STANDARD_PROFILES, DEFAULT_TIER_MODELS,
 	IMPL_TEMPLATES, RESEARCH_TEMPLATES,
 } from "../src/lib.ts";
 
@@ -95,10 +97,10 @@ test("fmtTokens / fmtCost", () => {
 /* ───────────────────────── plans ───────────────────────── */
 
 test("summarizeCost: every template", () => {
-	assert.equal(summarizeCost(IMPL_TEMPLATES.surface), "1 util-tier ($) + 1 high-tier ($$$)");
-	assert.equal(summarizeCost(IMPL_TEMPLATES.standard), "2 util-tier ($) + 1 research-tier ($$) + 2 high-tier ($$$)");
-	assert.equal(summarizeCost(RESEARCH_TEMPLATES.standard), "1 util-tier ($) + 3 research-tier ($$)");
-	assert.equal(summarizeCost(RESEARCH_TEMPLATES.surface), "1 util-tier ($) + 1 research-tier ($$)");
+	assert.equal(summarizeCost(IMPL_TEMPLATES.surface), "1 util + 1 high");
+	assert.equal(summarizeCost(IMPL_TEMPLATES.standard), "2 util + 1 research + 2 high");
+	assert.equal(summarizeCost(RESEARCH_TEMPLATES.standard), "1 util + 3 research");
+	assert.equal(summarizeCost(RESEARCH_TEMPLATES.surface), "1 util + 1 research");
 });
 
 test("buildPlan: selects the right template for all 6 mode×effort combos", () => {
@@ -141,7 +143,7 @@ test("mapResultEntry + rollupByModel: fallback attempts charged to the model tha
 test("A2: per-step total reconciles with per-model rollup when a model fell back", () => {
 	const report = {
 		planMode: "research", planEffort: "standard",
-		planCostShape: "1 util-tier ($) + 3 research-tier ($$)",
+		planCostShape: "1 util + 3 research",
 		steps: [{
 			stepIndex: 1, mode: "single", agent: "util", task: "t",
 			results: [mapResultEntry(fallbackResult())],
@@ -257,8 +259,36 @@ test("isTierAgent", () => {
 	assert.equal(isTierAgent("util"), true);
 	assert.equal(isTierAgent("research"), true);
 	assert.equal(isTierAgent("high"), true);
+	assert.equal(isTierAgent("dev"), true);          // new fourth profile
 	assert.equal(isTierAgent("worker"), false);
 	assert.equal(isTierAgent(undefined), false);
+});
+
+/* ───────────────────────── profiles (dev is standard) ───────────────────────── */
+
+test("STANDARD_PROFILES includes dev as the fourth profile", () => {
+	assert.deepEqual([...STANDARD_PROFILES], ["dev", "util", "research", "high"]);
+});
+
+test("DEFAULT_TIER_MODELS binds every standard profile", () => {
+	for (const p of STANDARD_PROFILES) {
+		assert.ok(DEFAULT_TIER_MODELS[p], `missing default model for ${p}`);
+	}
+});
+
+test("injectTierModels: dev profile gets its model injected", () => {
+	const input: any = { agent: "dev", task: "t" };
+	injectTierModels(input, DEFAULT_TIER_MODELS);
+	assert.equal(input.model, "openrouter/moonshotai/kimi-k2.7-code");
+});
+
+test("PlanStep no longer has tier/costClass fields", () => {
+	const plan = buildPlan({ task: "x", mode: "implementation", effort: "surface" });
+	for (const s of plan.steps) {
+		assert.equal("tier" in s, false, `step ${s.phase} should not have tier`);
+		assert.equal("costClass" in s, false, `step ${s.phase} should not have costClass`);
+		assert.ok(typeof s.agent === "string" && s.agent.length > 0);
+	}
 });
 
 /* ───────────────────────── buildCostStep / newReport ───────────────────────── */
@@ -307,4 +337,64 @@ test("newReport: seeds plan metadata with empty steps", () => {
 test("newReport: dryRun flag propagated", () => {
 	const plan = buildPlan({ task: "x", mode: "research", effort: "deep" });
 	assert.equal(newReport(plan, true).dryRun, true);
+});
+
+/* ───────────────────────── RunMetrics (single source of truth) ───────────────────────── */
+
+test("toRunMetrics: snapshots a report with plan metadata + per-step duration", () => {
+	const plan = buildPlan({ task: "x", mode: "implementation", effort: "surface" });
+	const report = newReport(plan, false);
+	// Simulate one accumulated step with a result that has durationMs.
+	const step = buildCostStep(
+		{ agent: "util", task: "do work" },
+		{ mode: "single", results: [{ agent: "util", model: "minimax/minimax-m3", task: "do work", exitCode: 0, usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, cost: 0.01, turns: 2 }, progressSummary: { toolCount: 3, durationMs: 5000 } }] },
+		1,
+	);
+	if (step) report.steps.push(step);
+	const metrics = toRunMetrics(report, 1000, 2000, "my-recipe");
+	assert.equal(metrics.planName, "my-recipe");
+	assert.equal(metrics.dryRun, false);
+	assert.equal(metrics.startedAt, 1000);
+	assert.equal(metrics.endedAt, 2000);
+	assert.equal(metrics.steps.length, 1);
+	assert.equal(metrics.steps[0].durationMs, 5000);
+	assert.equal(metrics.steps[0].agent, "util");
+});
+
+test("metricsByModel + metricsTotalCost: fallback attempts charged correctly", () => {
+	const report = newReport(buildPlan({ task: "x", mode: "research", effort: "standard" }), false);
+	const step = buildCostStep(
+		{ agent: "util", task: "t" },
+		{ mode: "single", results: [fallbackResult()] },
+		1,
+	);
+	if (step) report.steps.push(step);
+	const metrics = toRunMetrics(report, 0);
+	const byM = metricsByModel(metrics);
+	assert.ok(Math.abs(byM.get("minimax/minimax-m3")!.cost - 0.001) < 1e-9);
+	assert.ok(Math.abs(byM.get("z-ai/glm-5.2")!.cost - 0.02226261) < 1e-9);
+	// total = 0.001 + 0.02226261
+	assert.ok(Math.abs(metricsTotalCost(metrics) - 0.02326261) < 1e-9);
+});
+
+test("metricsTotalDurationMs: sums per-step durations", () => {
+	const report = newReport(buildPlan({ task: "x", mode: "research", effort: "surface" }), false);
+	for (let i = 0; i < 2; i++) {
+		const step = buildCostStep(
+			{ agent: "util", task: `t${i}` },
+			{ mode: "single", results: [{ agent: "util", model: "m", task: `t${i}`, exitCode: 0, progressSummary: { toolCount: 1, durationMs: 3000 + i * 1000 } }] },
+			i + 1,
+		);
+		if (step) report.steps.push(step);
+	}
+	const metrics = toRunMetrics(report, 0);
+	assert.equal(metricsTotalDurationMs(metrics), 7000); // 3000 + 4000
+});
+
+test("metricsByModel: empty run yields empty map, zero totals", () => {
+	const report = newReport(buildPlan({ task: "x", mode: "research", effort: "surface" }), false);
+	const metrics = toRunMetrics(report, 0);
+	assert.equal(metricsByModel(metrics).size, 0);
+	assert.equal(metricsTotalCost(metrics), 0);
+	assert.equal(metricsTotalDurationMs(metrics), 0);
 });

@@ -22,7 +22,12 @@ export const DEFAULT_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "se
 
 export type Effort = "surface" | "standard" | "deep";
 export type Mode = "research" | "implementation";
-export type CostClass = "$" | "$$" | "$$$";
+
+/** The standard profile roster. Recipes and built-ins name agents from this
+ *  set (or any custom agent). The user binds each to a real model via
+ *  `subagents.agentOverrides` in settings.json. */
+export const STANDARD_PROFILES = ["dev", "util", "research", "high"] as const;
+export type Profile = (typeof STANDARD_PROFILES)[number];
 
 export interface PipelineParams {
 	task: string;
@@ -34,14 +39,12 @@ export interface PipelineParams {
 
 export interface PlanStep {
 	phase: string;
-	tier: "high" | "research" | "util";
-	agent: string;
+	agent: string;        // a profile (dev/util/research/high) or any custom agent name
 	label: string;
 	task: string;
 	output?: string;
 	reads?: string[];
 	parallel?: number;
-	costClass: CostClass;
 }
 
 export interface Plan {
@@ -79,16 +82,18 @@ export function inferMode(task: string): Mode {
 	return "implementation";
 }
 
-/* ────────────────── cost class per tier ────────────────── */
+/* ────────────────── plan steps (agent-only, no cost class) ──────────────────
+ * Profiles (dev/util/research/high) replace the old tier+costClass pair.
+ * A step names an agent; the user binds agents to models via settings.json.
+ * `agent()` is a tiny helper so the templates read as `agent("util", {...})`
+ * instead of the old `withCostClass({ tier: "util", ... })`.
+ */
 
-export const TIER_COST: Record<PlanStep["tier"], CostClass> = {
-	util: "$",       // M3 / similar
-	research: "$$",  // glm-5.2 / similar
-	high: "$$$",     // sonnet-5 / similar
-};
-
-export function withCostClass<T extends Omit<PlanStep, "costClass">>(step: T): PlanStep {
-	return { ...step, costClass: TIER_COST[step.tier] };
+/** Tag a plan-step template literal with its agent. Returns the step as-is
+ *  (the `agent` field carries the profile name); exists for readability and
+ *  to mirror the old `withCostClass` shape during the migration. */
+function agent<A extends string>(a: A, step: Omit<PlanStep, "agent">): PlanStep {
+	return { ...step, agent: a };
 }
 
 /* ═══════════════════ implementation templates ═══════════════════
@@ -102,19 +107,15 @@ export const IMPL_SURFACE: Plan = {
 	mode: "implementation",
 	summary: "1 util + 1 high. Quick recon, then a single high-tier judgment.",
 	steps: [
-		withCostClass({
+		agent("util", {
 			phase: "Recon",
-			tier: "util",
-			agent: "util",
 			label: "Skim the relevant context",
 			task:
 				"Skim the requested area. Read 3–10 files or directory listings. Return a tight 200–400 word summary of what you found: file paths, line ranges, the key types/functions, and the obvious risks or unknowns. Do not edit anything. If the task refers to specific files or symbols, prioritize those.",
 			output: "context.md",
 		}),
-		withCostClass({
+		agent("high", {
 			phase: "Judgment",
-			tier: "high",
-			agent: "high",
 			label: "High-tier verdict",
 			task:
 				"Read context.md and the user's task. Return a one-paragraph judgment and a one-line verdict (accept / kick back / not-feasible / needs-clarification). If you recommend a next step, name the single highest-leverage one.",
@@ -128,47 +129,37 @@ export const IMPL_STANDARD: Plan = {
 	mode: "implementation",
 	summary: "1 high + 1 util + 1 research + 1 high. Plan, do, review, accept.",
 	steps: [
-		withCostClass({
+		agent("high", {
 			phase: "Plan",
-			tier: "high",
-			agent: "high",
 			label: "Spec the work (returns spec as text)",
 			task:
 				"Write a one-paragraph spec for the task, then a numbered list of 2–5 concrete steps. For each step, name the tier that should do it and the deliverable (file path or short text). If the task itself is ambiguous, say so explicitly and the orchestrator will surface the question to the user. IMPORTANT: return the spec in your final assistant message as text — do not try to write a file (your tools are read-only on purpose). The util step below will read your message and write spec.md for you.",
 		}),
-		withCostClass({
+		agent("util", {
 			phase: "Persist spec",
-			tier: "util",
-			agent: "util",
 			label: "Write spec.md from the high agent's message",
 			task:
 				"Read the parent's most recent assistant message — it contains the spec the high agent produced. Write the full contents of that message to `spec.md` so the next step can read it. Do not edit the spec, do not add to it. Just persist it. After writing, confirm the file path and the first line of the spec.",
 			output: "spec.md",
 		}),
-		withCostClass({
+		agent("util", {
 			phase: "Execute",
-			tier: "util",
-			agent: "util",
 			label: "Do the work per spec",
 			task:
 				"Read spec.md and follow each step exactly. Don't add features, don't refactor surrounding code. Edit files, run the project's tests if spec.md calls for it, and gather any data the next step needs. Write your result to the file named in spec.md for the work product; write any context the next step needs to `context.md`.",
 			reads: ["spec.md"],
 			output: "context.md",
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Review",
-			tier: "research",
-			agent: "research",
 			label: "Consolidate and review",
 			task:
 				"Read spec.md and context.md. Verify the work matches the spec. If something is missing or wrong, list it with `file:line` references. If the work is good, write a 1-paragraph assessment. Do not edit code unless spec.md explicitly asked for fixes-applied review.",
 			reads: ["spec.md", "context.md"],
 			output: "review.md",
 		}),
-		withCostClass({
+		agent("high", {
 			phase: "Accept",
-			tier: "high",
-			agent: "high",
 			label: "Accept or kick back",
 			task:
 				"Read spec.md, context.md, review.md. Return a one-line verdict: `accept` or `kick back`. If kick back, name the top 1–2 specific changes that would flip it to accept. Be brief; the user wants a verdict, not an essay. IMPORTANT: return the verdict in your final assistant message as text — do not try to write a file (your tools are read-only on purpose).",
@@ -183,47 +174,37 @@ export const IMPL_DEEP: Plan = {
 	summary:
 		"Estimator + 1 high + 1 util + 2 util (parallel drafts) + 1 research (merge) + 1 high, with up to 3 kick-back rounds.",
 	steps: [
-		withCostClass({
+		agent("util", {
 			phase: "Estimate",
-			tier: "util",
-			agent: "util",
 			label: "Estimate effort and confidence",
 			task:
 				"Read the project briefly (just enough to size the work). Return a JSON object with: `effort_recommendation` (one of `surface`, `standard`, `deep`), `confidence` (0.0–1.0), `estimated_high_tier_calls` (integer), `reasoning` (one paragraph), and `blockers` (array of strings, possibly empty). Do not edit files; this is read-only sizing.",
 			output: "estimate.md",
 		}),
-		withCostClass({
+		agent("high", {
 			phase: "Plan",
-			tier: "high",
-			agent: "high",
 			label: "Spec the work (returns spec as text)",
 			task:
 				"Read estimate.md. Write a one-paragraph spec for the task, then a numbered list of 2–5 concrete steps. Each step names the tier (util/research/high) and the deliverable. If the task itself is ambiguous, say so explicitly. Include any acceptance criteria you can name from the user's request. IMPORTANT: return the spec in your final assistant message as text — do not try to write a file (your tools are read-only on purpose). The util step below will read your message and write spec.md for you.",
 			reads: ["estimate.md"],
 		}),
-		withCostClass({
+		agent("util", {
 			phase: "Persist spec",
-			tier: "util",
-			agent: "util",
 			label: "Write spec.md from the high agent's message",
 			task:
 				"Read the parent's most recent assistant message — it contains the spec the high agent produced. Write the full contents of that message to `spec.md` so the next step can read it. Do not edit the spec, do not add to it. Just persist it. After writing, confirm the file path and the first line of the spec.",
 			output: "spec.md",
 		}),
-		withCostClass({
+		agent("util", {
 			phase: "Gather",
-			tier: "util",
-			agent: "util",
 			label: "Gather relevant context",
 			task:
 				"Read spec.md. Find the 5–15 most relevant files for the work. Read each. Write `context.md` with file paths, line ranges, and 1–2 line notes on what each file does that's relevant. Don't analyze — that's the research tier's job.",
 			reads: ["spec.md"],
 			output: "context.md",
 		}),
-		withCostClass({
+		agent("util", {
 			phase: "Draft (best-of-N)",
-			tier: "util",
-			agent: "util",
 			label: "Draft approach A",
 			task:
 				"Read spec.md and context.md. Produce draft A: implement the spec in `draft-A.md` (a single markdown file containing the proposed code changes as fenced blocks with file paths). Keep it minimal; don't refactor beyond the spec. Don't apply the changes — just write the draft.",
@@ -231,10 +212,8 @@ export const IMPL_DEEP: Plan = {
 			output: "draft-A.md",
 			parallel: 1,
 		}),
-		withCostClass({
+		agent("util", {
 			phase: "Draft (best-of-N)",
-			tier: "util",
-			agent: "util",
 			label: "Draft approach B (different angle)",
 			task:
 				"Read spec.md and context.md. Produce draft B in `draft-B.md` — a different approach from A. Aim for diversity: if A favored one pattern, try a contrasting one. Same constraints as A: minimal, no scope creep, code in fenced blocks with file paths.",
@@ -242,20 +221,16 @@ export const IMPL_DEEP: Plan = {
 			output: "draft-B.md",
 			parallel: 2,
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Merge",
-			tier: "research",
-			agent: "research",
 			label: "Pick or merge drafts",
 			task:
 				"Read spec.md, context.md, draft-A.md, draft-B.md. Pick the better draft, or merge the strongest ideas from both. Write the final implementation as fenced code blocks with file paths to `final.md`. Justify your pick in 1–2 paragraphs at the top. Do not apply the changes to source files.",
 			reads: ["spec.md", "context.md", "draft-A.md", "draft-B.md"],
 			output: "final.md",
 		}),
-		withCostClass({
+		agent("high", {
 			phase: "Accept",
-			tier: "high",
-			agent: "high",
 			label: "Accept or kick back",
 			task:
 				"Read spec.md, context.md, draft-A.md, draft-B.md, final.md. Return a one-line verdict: `accept` or `kick back`. If kick back, name the top 1–2 specific changes. The orchestrator may loop you back to the merge step up to 3 times total before giving up. IMPORTANT: return the verdict in your final assistant message as text — do not try to write a file (your tools are read-only on purpose).",
@@ -282,19 +257,15 @@ export const RESEARCH_SURFACE: Plan = {
 	summary:
 		"1 util skim + 1 research review. No high-tier calls. Use for quick reviews of 1–3 files.",
 	steps: [
-		withCostClass({
+		agent("util", {
 			phase: "Recon",
-			tier: "util",
-			agent: "util",
 			label: "Skim the requested material",
 			task:
 				"Read the 1–3 files or directory the user named. Return a tight 200–400 word summary: file paths, line ranges, the key claims/decisions/learnings, and any follow-up the next step should chase. Do not edit anything. If the user named a specific file, prioritize that file's content.",
 			output: "context.md",
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Review",
-			tier: "research",
-			agent: "research",
 			label: "Consolidate and review",
 			task:
 				"Read context.md. Produce a 1-paragraph review and a one-line verdict (accept / kick back / needs-clarification). If the user wanted a structured list, return it as bullets with file:line citations. If kick back, name the single highest-leverage thing the next pass should fix.",
@@ -309,19 +280,15 @@ export const RESEARCH_STANDARD: Plan = {
 	summary:
 		"1 util partition + N research extractions (parallel) + 1 research merge. No high-tier calls. Use for multi-source extraction (devlogs + postmortems + audits, etc.).",
 	steps: [
-		withCostClass({
+		agent("util", {
 			phase: "Partition",
-			tier: "util",
-			agent: "util",
 			label: "Inventory + partition the source set by theme",
 			task:
 				"Read the user's task and the project structure. Identify the 3–8 source files the parent should hand to the parallel research subagents. Group them by theme (e.g. 'bot/verb reliability', 'multi-agent cooperation', 'testing methodology', 'world/fixtures') and write `partition.md` as a short table: theme → files → 1-line scope note. If the user already partitioned in the task description, just persist their partition. After writing, list the themes and their files.",
 			output: "partition.md",
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Extract (parallel)",
-			tier: "research",
-			agent: "research",
 			label: "Extract theme-1 findings (parallel slot 1)",
 			task:
 				"Read partition.md. For the theme assigned to slot 1, read every file the partition names for that theme. Produce a structured bulleted findings dump: each bullet is `**topic** — `file` (date, run id). *Tried:* / *Worked:* / *Failed:* / *Decided:*`. Do NOT extract themes that belong to other slots. Write the dump to `findings-<theme>.md` (parent will pass the theme name).",
@@ -329,10 +296,8 @@ export const RESEARCH_STANDARD: Plan = {
 			output: "findings-<theme-1>.md",
 			parallel: 1,
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Extract (parallel)",
-			tier: "research",
-			agent: "research",
 			label: "Extract theme-2 findings (parallel slot 2)",
 			task:
 				"Read partition.md. For the theme assigned to slot 2, read every file the partition names for that theme. Produce a structured bulleted findings dump: each bullet is `**topic** — `file` (date, run id). *Tried:* / *Worked:* / *Failed:* / *Decided:*`. Do NOT extract themes that belong to other slots. Write the dump to `findings-<theme>.md` (parent will pass the theme name).",
@@ -340,10 +305,8 @@ export const RESEARCH_STANDARD: Plan = {
 			output: "findings-<theme-2>.md",
 			parallel: 2,
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Merge",
-			tier: "research",
-			agent: "research",
 			label: "Cross-check findings and write the synthesis",
 			task:
 				"Read partition.md and every `findings-*.md` produced by the parallel extractions. Cross-check for: (a) facts cited in one place but contradicted in another, (b) themes that should be merged or split, (c) numerical claims that should be preserved verbatim. Write a short `synthesis.md` with: top 5 decisions carried forward, top 3 open questions, and pointers into the per-theme files. Do not duplicate the per-theme dumps.",
@@ -359,19 +322,15 @@ export const RESEARCH_DEEP: Plan = {
 	summary:
 		"1 util partition + N research extractions (parallel) + 1 research merge + 1 high accept. The high accept is the only $$$ call; everything else is $ or $$.",
 	steps: [
-		withCostClass({
+		agent("util", {
 			phase: "Partition",
-			tier: "util",
-			agent: "util",
 			label: "Inventory + partition the source set by theme",
 			task:
 				"Read the user's task and the project structure. Identify the 4–12 source files the parent should hand to the parallel research subagents. Group them by theme (e.g. 'bot/verb reliability', 'multi-agent cooperation', 'testing methodology', 'world/fixtures', 'architecture falsification') and write `partition.md` as a short table: theme → files → 1-line scope note. Aim for 3–5 themes total. If the user already partitioned in the task description, persist their partition. After writing, list the themes and their files.",
 			output: "partition.md",
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Extract (parallel)",
-			tier: "research",
-			agent: "research",
 			label: "Extract theme-1 findings (parallel slot 1)",
 			task:
 				"Read partition.md. For the theme assigned to slot 1, read every file the partition names for that theme. Produce a structured bulleted findings dump: each bullet is `**topic** — `file` (date, run id). *Tried:* / *Worked:* / *Failed:* / *Decided:*`. Do NOT extract themes that belong to other slots. Write the dump to `findings-<theme>.md` (parent will pass the theme name). Include cross-references to other themes where they touch the same incident, but only as inline references — not as full extractions.",
@@ -379,10 +338,8 @@ export const RESEARCH_DEEP: Plan = {
 			output: "findings-<theme-1>.md",
 			parallel: 1,
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Extract (parallel)",
-			tier: "research",
-			agent: "research",
 			label: "Extract theme-2 findings (parallel slot 2)",
 			task:
 				"Read partition.md. For the theme assigned to slot 2, read every file the partition names for that theme. Produce a structured bulleted findings dump: each bullet is `**topic** — `file` (date, run id). *Tried:* / *Worked:* / *Failed:* / *Decided:*`. Do NOT extract themes that belong to other slots. Write the dump to `findings-<theme>.md` (parent will pass the theme name). Include cross-references to other themes where they touch the same incident, but only as inline references — not as full extractions.",
@@ -390,10 +347,8 @@ export const RESEARCH_DEEP: Plan = {
 			output: "findings-<theme-2>.md",
 			parallel: 2,
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Extract (parallel)",
-			tier: "research",
-			agent: "research",
 			label: "Extract theme-3 findings (parallel slot 3)",
 			task:
 				"Read partition.md. For the theme assigned to slot 3, read every file the partition names for that theme. Produce a structured bulleted findings dump: each bullet is `**topic** — `file` (date, run id). *Tried:* / *Worked:* / *Failed:* / *Decided:*`. Do NOT extract themes that belong to other slots. Write the dump to `findings-<theme>.md` (parent will pass the theme name). Include cross-references to other themes where they touch the same incident, but only as inline references — not as full extractions.",
@@ -401,20 +356,16 @@ export const RESEARCH_DEEP: Plan = {
 			output: "findings-<theme-3>.md",
 			parallel: 3,
 		}),
-		withCostClass({
+		agent("research", {
 			phase: "Merge",
-			tier: "research",
-			agent: "research",
 			label: "Cross-check findings and write the synthesis",
 			task:
 				"Read partition.md and every `findings-*.md` produced by the parallel extractions. Cross-check for: (a) facts cited in one place but contradicted in another, (b) themes that should be merged or split, (c) numerical claims that should be preserved verbatim. Write a comprehensive `synthesis.md` with: top 10 decisions carried forward, top 5 open questions, conflicts between sources, and pointers into the per-theme files. Do not duplicate the per-theme dumps.",
 			reads: ["partition.md"],
 			output: "synthesis.md",
 		}),
-		withCostClass({
+		agent("high", {
 			phase: "Accept",
-			tier: "high",
-			agent: "high",
 			label: "Accept or kick back",
 			task:
 				"Read partition.md, every `findings-*.md`, and synthesis.md. Return a one-line verdict: `accept` or `kick back`. The bar is: every theme has a populated findings file, every entry has the four quadruple fields and a citation, and the synthesis top-10 is consistent with the per-theme dumps. If kick back, name the single highest-leverage fix. IMPORTANT: return the verdict in your final assistant message as text — do not try to write a file (your tools are read-only on purpose).",
@@ -474,6 +425,7 @@ export type ModelClass = "utility" | "coding" | "stronger";
 /** Map each known primary model id → its fallback class. */
 export const PRIMARY_TO_CLASS: Record<string, ModelClass> = {
 	"minimax/minimax-m3": "utility",
+	"moonshotai/kimi-k2.7-code": "utility",   // default dev model
 	"z-ai/glm-5.2": "coding",
 	"anthropic/claude-sonnet-5": "stronger",
 };
@@ -535,7 +487,8 @@ export function fallbacksFor(modelId: string | undefined, filePath: string = DEF
  * restart is still recommended so pi-subagents' own mapping is consistent.
  */
 
-export const DEFAULT_TIER_MODELS: Record<"util" | "research" | "high", string> = {
+export const DEFAULT_TIER_MODELS: Record<Profile, string> = {
+	dev: "openrouter/moonshotai/kimi-k2.7-code",
 	util: "openrouter/minimax/minimax-m3",
 	research: "openrouter/z-ai/glm-5.2",
 	high: "openrouter/anthropic/claude-sonnet-5",
@@ -545,16 +498,14 @@ export const DEFAULT_TIER_MODELS: Record<"util" | "research" | "high", string> =
  *  `subagents.agentOverrides.<tier>.model`. Falls back to the defaults.
  *  Not memoized: re-read each dispatch so edits to settings.json take
  *  effect on the next subagent call even in a stale parent process. */
-export function loadTierModels(filePath: string = DEFAULT_SETTINGS_PATH): Record<"util" | "research" | "high", string> {
-	const out: Record<"util" | "research" | "high", string> = {
-		...DEFAULT_TIER_MODELS,
-	};
+export function loadTierModels(filePath: string = DEFAULT_SETTINGS_PATH): Record<Profile, string> {
+	const out: Record<Profile, string> = { ...DEFAULT_TIER_MODELS };
 	try {
 		const raw = fs.readFileSync(filePath, "utf8");
 		const parsed = JSON.parse(raw);
 		const ao = parsed?.subagents?.agentOverrides;
 		if (ao && typeof ao === "object") {
-			for (const k of ["util", "research", "high"] as const) {
+			for (const k of STANDARD_PROFILES) {
 				const m = ao[k]?.model;
 				if (typeof m === "string" && m.trim()) out[k] = m.trim();
 			}
@@ -565,9 +516,9 @@ export function loadTierModels(filePath: string = DEFAULT_SETTINGS_PATH): Record
 	return out;
 }
 
-/** Is `agentName` one of our three pipeline tier agents? */
-export function isTierAgent(agentName: unknown): agentName is "util" | "research" | "high" {
-	return agentName === "util" || agentName === "research" || agentName === "high";
+/** Is `agentName` one of the standard pipeline profiles? */
+export function isTierAgent(agentName: unknown): agentName is Profile {
+	return typeof agentName === "string" && (STANDARD_PROFILES as readonly string[]).includes(agentName);
 }
 
 /* ──────────────────────── cost tracking ────────────────────────
@@ -622,6 +573,81 @@ export interface PipelineCostReport {
 	planCostShape?: string;
 	dryRun?: boolean;
 	steps: CostStep[];
+}
+
+/* ──────────────────────── RunMetrics (single source of truth) ────────────────────────
+ *
+ * The canonical record of one pipeline run's cost/time/tokens, captured for
+ * EVERY run (not just when a cost command is invoked). All future consumers —
+ * overview TUI cost estimate, live dashboard, footer widget, reports — read
+ * from this shape so they answer "per-step cost", "per-model cost", "total
+ * run cost", "session cumulative", and "time per step/model" without
+ * re-deriving. `PipelineCostReport` (above) is the live accumulator; a
+ * finalized run snapshots into a `RunMetrics` record.
+ */
+
+export interface RunMetricsEntry {
+	stepIndex: number;       // dispatch order
+	mode: string;            // "single" | "parallel" | ...
+	agent: string;           // single agent, or comma-joined for parallel
+	task: string;            // snippet
+	results: CostResultEntry[];
+	durationMs: number;      // sum across results (0 if unknown)
+}
+
+export interface RunMetrics {
+	planName?: string;       // recipe name, or undefined for the generic path
+	planMode?: string;
+	planEffort?: string;
+	planCostShape?: string;
+	dryRun: boolean;
+	startedAt: number;       // epoch ms
+	endedAt?: number;        // epoch ms; set when the run finalizes
+	steps: RunMetricsEntry[];
+}
+
+/** Snapshot a cost report into an immutable RunMetrics record. `startedAt`
+ *  is the caller's responsibility (set when the pipeline op began). */
+export function toRunMetrics(
+	report: PipelineCostReport,
+	startedAt: number,
+	endedAt?: number,
+	planName?: string,
+): RunMetrics {
+	return {
+		planName,
+		planMode: report.planMode,
+		planEffort: report.planEffort,
+		planCostShape: report.planCostShape,
+		dryRun: report.dryRun ?? false,
+		startedAt,
+		endedAt,
+		steps: report.steps.map((s) => ({
+			stepIndex: s.stepIndex,
+			mode: s.mode,
+			agent: s.agent,
+			task: s.task,
+			results: s.results,
+			durationMs: s.results.reduce((a, r) => a + (r.durationMs ?? 0), 0),
+		})),
+	};
+}
+
+/** Per-model rollup from a RunMetrics record. Reuses rollupByModel on the
+ *  report shape; provided here as the canonical accessor. */
+export function metricsByModel(metrics: RunMetrics): Map<string, ModelUsageTotals> {
+	return rollupByModel({ steps: metrics.steps } as PipelineCostReport);
+}
+
+/** Total cost across a run. */
+export function metricsTotalCost(metrics: RunMetrics): number {
+	return [...metricsByModel(metrics).values()].reduce((a, t) => a + t.cost, 0);
+}
+
+/** Total wall-clock duration across all steps (sum; not end-to-end — parallel
+ *  steps overlap). 0 if no step has a duration. */
+export function metricsTotalDurationMs(metrics: RunMetrics): number {
+	return metrics.steps.reduce((a, s) => a + s.durationMs, 0);
 }
 
 
@@ -840,29 +866,32 @@ export function buildPlan(params: PipelineParams): Plan {
 }
 
 export function summarizeCost(plan: Plan): string {
-	// Aggregate per cost class so the user can see the bill shape at a glance.
-	const counts: Record<CostClass, number> = { "$": 0, "$$": 0, "$$$": 0 };
-	for (const s of plan.steps) counts[s.costClass]++;
-	const parts: string[] = [];
-	if (counts["$"] > 0) parts.push(`${counts["$"]} util-tier ($)`);
-	if (counts["$$"] > 0) parts.push(`${counts["$$"]} research-tier ($$)`);
-	if (counts["$$$"] > 0) parts.push(`${counts["$$$"]} high-tier ($$$)`);
-	return parts.join(" + ");
+	// Aggregate per agent so the user sees the bill shape at a glance.
+	// Agents are named profiles (dev/util/research/high) or custom agents;
+	// real per-model cost is shown in the overview/dashboard from RunMetrics.
+	const counts = new Map<string, number>();
+	for (const s of plan.steps) counts.set(s.agent, (counts.get(s.agent) ?? 0) + 1);
+	// Stable order: standard profiles first (in roster order), then any custom.
+	const order = [...STANDARD_PROFILES];
+	const seen = new Set(order);
+	for (const a of counts.keys()) if (!seen.has(a)) order.push(a);
+	return order
+		.filter((a) => (counts.get(a) ?? 0) > 0)
+		.map((a) => `${counts.get(a)} ${a}`)
+		.join(" + ");
 }
 
 export function renderPlan(plan: Plan, task: string, dryRun: boolean): string {
 	const stepCount = plan.steps.length;
-	const tierCount = plan.steps.reduce(
+	const agentCount = plan.steps.reduce(
 		(acc, s) => {
-			acc[s.tier] = (acc[s.tier] ?? 0) + 1;
+			acc[s.agent] = (acc[s.agent] ?? 0) + 1;
 			return acc;
 		},
 		{} as Record<string, number>,
 	);
-	const breakdown = Object.entries(tierCount)
-		.map(([t, n]) => `${n} ${t}`)
-		.join(", ");
-	const costShape = summarizeCost(plan);
+	const breakdown = summarizeCost(plan);
+	const costShape = breakdown;
 
 	const lines: string[] = [
 		`## Pipeline plan: mode=${plan.mode} effort=${plan.effort} (${breakdown}, ${stepCount} steps)`,
@@ -889,9 +918,9 @@ export function renderPlan(plan: Plan, task: string, dryRun: boolean): string {
 		const s = plan.steps[i];
 		const parallelTag = s.parallel ? ` [parallel #${s.parallel}]` : "";
 		lines.push(
-			`### Step ${i + 1} — ${s.phase}: ${s.label}${parallelTag}  (${s.costClass})`,
+			`### Step ${i + 1} — ${s.phase}: ${s.label}${parallelTag}  (${s.agent})`,
 		);
-		lines.push(`- **Tier:** ${s.tier} (\`${s.agent}\`)  ·  **Cost class:** ${s.costClass}`);
+		lines.push(`- **Agent:** \`${s.agent}\``);
 		if (s.output) lines.push(`- **Writes:** ${s.output}`);
 		if (s.reads?.length) lines.push(`- **Reads:** ${s.reads.join(", ")}`);
 		lines.push("");
@@ -936,7 +965,7 @@ export function renderPlan(plan: Plan, task: string, dryRun: boolean): string {
  *  (parallel), and `chain` (incl. `parallel` fanout groups) shapes. */
 export function injectTierModels(
 	input: Record<string, any>,
-	tierModels: Record<"util" | "research" | "high", string>,
+	tierModels: Record<Profile, string>,
 ): Record<string, any> {
 	const inject = (entry: Record<string, any>) => {
 		const a = entry["agent"];
