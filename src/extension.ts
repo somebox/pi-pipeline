@@ -481,6 +481,66 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// 4c. `/pipeline-spike` — Spike-test of the Phase 2 compile-to-chain loop:
+	// compiles a 2-step structured loop (enumerate -> map) over cards/internal/core.
+	// Instructs the parent LLM to execute it natively with zero middleman overhead.
+	pi.registerCommand("pipeline-spike", {
+		description:
+			"Spike-test of Phase 2 iteration: runs a compiled, bounded Map-Reduce chain loop over cards/internal/core.",
+		handler: async (_args, ctx) => {
+			const targetDir = "/home/user/src/cards";
+			const chain = [
+				{
+					agent: "util",
+					phase: "Enumerate",
+					label: "Enumerate internal/core Go files",
+					as: "test_files",
+					task: `Scan ${targetDir}/internal/core and identify up to 3 .go files. Use the structured_output tool to write a JSON array containing these files, matching the provided schema. Each item should have a 'path' property relative to the repo root (e.g. \"internal/core/service.go\").`,
+					outputSchema: {
+						type: "object",
+						properties: {
+							items: {
+								type: "array",
+								items: {
+									type: "object",
+									properties: {
+										path: { type: "string" }
+									},
+									required: ["path"]
+								}
+							}
+						},
+						required: ["items"]
+					}
+				},
+				{
+					expand: {
+						from: { output: "test_files", path: "/items" },
+						item: "unit"
+					},
+					parallel: {
+						agent: "dev",
+						phase: "Map",
+						label: "Summarize {unit.path}",
+						task: `Read ${targetDir}/{unit.path}. Write a 1-sentence summary of what its main struct does to 'summary-core.md' (append it or write to separate files). Note: read ONLY that file.`,
+						reads: [`${targetDir}/{unit.path}`],
+						output: "summary-core.md",
+						tools: ["read", "write"]
+					}
+				}
+			];
+
+			await pi.sendUserMessage(
+				`Execute the Phase 2 compiler spike test by calling the \`subagent\` tool with this exact \`chain\` argument. Do not edit, truncate, or paraphrase this chain under any circumstance—just invoke the tool.\n\n` +
+				`\`\`\`json\n` +
+				`{\n` +
+				`  "chain": ${JSON.stringify(chain, null, 2)}\n` +
+				`}\n` +
+				`\`\`\``
+			);
+		},
+	});
+
 	// 5. `/pipelines` — list available pipelines (interim text command until
 	// the list TUI ships in Phase 3). Lists recipes (user/project/package) plus
 	// the built-in generic path.
