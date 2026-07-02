@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import {
 	parseFrontmatter, parseStepHeaderTail, inferOutput, inferReads,
 	substituteInputs, parseSteps, buildPlanFromRecipe, declaredInputs,
-	usedPlaceholders,
+	usedPlaceholders, compileRecipeToChain,
 } from "../src/recipes.ts";
 
 /* ───────────────────────── frontmatter ───────────────────────── */
@@ -299,5 +299,56 @@ test("buildPlanFromRecipe: infers iterate from prose", () => {
 		nameFallback: "x",
 	});
 	assert.equal(plan.steps[0].iterate, "scope-files");
+});
+
+/* ───────────────────────── compileRecipeToChain (Phase 2) ───────────────────────── */
+
+test("compileRecipeToChain: translates single standard step with .json output to dynamic outputSchema", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Enumerate (util, output=scope-files.json)\nGet lists.",
+		nameFallback: "x",
+	});
+	const chain = compileRecipeToChain(plan);
+	assert.equal(chain.length, 1);
+	assert.equal(chain[0].agent, "util");
+	assert.equal(chain[0].as, "scope-files"); // parsed from output filename
+	assert.equal(chain[0].output, "scope-files.json");
+	assert.deepEqual(chain[0].outputSchema, {
+		type: "object",
+		properties: {
+			items: {
+				type: "array",
+				items: {
+					type: "object",
+					properties: {
+						path: { type: "string" }
+					},
+					required: ["path"]
+				}
+			}
+		},
+		required: ["items"]
+	});
+});
+
+test("compileRecipeToChain: translates iterate step to expand/parallel subagent block", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Summarize (dev, iterate=scope-files, output=summary-{unit}.md, tools=read,write)\nDo for {unit.path}",
+		nameFallback: "x",
+	});
+	const chain = compileRecipeToChain(plan);
+	assert.equal(chain.length, 1);
+	assert.equal(chain[0].phase, "Summarize");
+	assert.deepEqual(chain[0].expand, {
+		from: { output: "scope-files", path: "/items" },
+		item: "unit",
+		key: "/path",
+		maxItems: 100,
+	});
+	assert.equal(chain[0].parallel.agent, "dev");
+	assert.equal(chain[0].parallel.task, "Do for {unit.path}");
+	assert.equal(chain[0].parallel.output, "summary-{unit.path}.md");
+	assert.deepEqual(chain[0].parallel.tools, ["read", "write"]);
+	assert.deepEqual(chain[0].collect, { as: "collected-scope-files" });
 });
 

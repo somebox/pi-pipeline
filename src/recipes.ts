@@ -275,3 +275,91 @@ export function usedPlaceholders(raw: string): string[] {
 	while ((m = re.exec(raw)) !== null) set.add(m[1]!);
 	return [...set];
 }
+
+/** Compile a parsed Recipe Plan into a pi-subagents execution chain array.
+ *  Translates iterate= steps to expand/parallel blocks, adding outputSchema
+ *  for any step writing a .json file so coordinates bind structured outputs natively. */
+export function compileRecipeToChain(plan: Plan): any[] {
+	const chain: any[] = [];
+	for (const step of plan.steps) {
+		const isIterate = typeof step.iterate === "string" && step.iterate.length > 0;
+		if (isIterate) {
+			const sourceName = step.iterate!;
+			const itemVar = "unit";
+			// Build the expand block referencing the unit-list source file by as-name
+			const expand = {
+				from: {
+					output: sourceName,
+					path: "/items",
+				},
+				item: itemVar,
+				key: "/path",
+				maxItems: 100,
+			};
+			// Build the dynamic parallel template for the loop map slots
+			const parallel: Record<string, any> = {
+				agent: step.agent,
+				task: step.task,
+			};
+			if (step.reads && step.reads.length > 0) {
+				parallel.reads = step.reads;
+			}
+			if (step.output) {
+				// Translate placeholder from {unit} syntax to {unit.path} for absolute pathing safely
+				parallel.output = step.output.replace(/\{unit\}/g, "{unit.path}");
+			}
+			if (step.tools && step.tools.length > 0) {
+				parallel.tools = step.tools;
+			}
+			chain.push({
+				phase: step.phase,
+				label: step.label,
+				expand,
+				parallel,
+				collect: {
+					as: `collected-${sourceName}`,
+				},
+			});
+		} else {
+			// Ordinary sequential step
+			const item: Record<string, any> = {
+				agent: step.agent,
+				phase: step.phase,
+				label: step.label,
+				task: step.task,
+			};
+			if (step.reads && step.reads.length > 0) {
+				item.reads = step.reads;
+			}
+			if (step.output) {
+				item.output = step.output;
+				// Auto-register structured schema if output file is a .json file
+				if (step.output.endsWith(".json")) {
+					const stem = step.output.replace(/\.json$/, "");
+					item.as = stem;
+					item.outputSchema = {
+						type: "object",
+						properties: {
+							items: {
+								type: "array",
+								items: {
+									type: "object",
+									properties: {
+										path: { type: "string" }
+									},
+									required: ["path"]
+								}
+							}
+						},
+						required: ["items"]
+					};
+				}
+			}
+			if (step.tools && step.tools.length > 0) {
+				item.tools = step.tools;
+			}
+			chain.push(item);
+		}
+	}
+	return chain;
+}

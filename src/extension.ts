@@ -62,7 +62,7 @@ import {
 	fmtTokens,
 	STATIC_STATUS,
 } from "./lib.ts";
-import { buildPlanFromRecipe } from "./recipes.ts";
+import { buildPlanFromRecipe, compileRecipeToChain } from "./recipes.ts";
 import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs } from "./discovery.ts";
 
 /* ──────────────────────── discovery helper ────────────────────────
@@ -292,7 +292,28 @@ export default function (pi: ExtensionAPI) {
 			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string> };
 			const resolved = resolvePlan(p);
 			const plan = resolved.plan;
-			const text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, p.task, p.dryRun ?? false);
+			let text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, p.task, p.dryRun ?? false);
+
+			// Compile to dynamic subagent chain if executing a named recipe (not in dryRun).
+			// This tells the parent LLM to immediately delegate the whole pipeline natively,
+			// bypassing manual orchestration and ensuring 100% determinism.
+			let compiledChain: any[] | undefined;
+			if (!p.dryRun && resolved.name) {
+				try {
+					compiledChain = compileRecipeToChain(plan);
+					const chainJson = JSON.stringify({ chain: compiledChain }, null, 2);
+					text += "\n\n" +
+						"### Compiled Execution Chain\n" +
+						"To execute this plan automatically with small bounded unit contexts and proper map-reduce parallel slot execution, **you MUST immediately call the `subagent` tool with this exact compiled `chain` argument.** Do not paraphrase, omit, or restructure this chain — invoke the subagent tool now:\n\n" +
+						"```json\n" +
+						chainJson + "\n" +
+						"```\n";
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					text += `\n\n**Warning (compiler):** Failed to compile recipe to chain: ${msg}. Falling back to manual step-by-step delegation.\n`;
+				}
+			}
+
 			return {
 				content: [
 					{
@@ -314,6 +335,7 @@ export default function (pi: ExtensionAPI) {
 					),
 					costShape: summarizeCost(plan),
 					dryRun: p.dryRun ?? false,
+					chain: compiledChain,
 				},
 			};
 		},
