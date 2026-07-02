@@ -952,6 +952,126 @@ function truncateHead(s: string, max: number): string {
 	return s.slice(0, max - 1) + "…";
 }
 
+import { spawnSync } from "node:child_process";
+
+/** Copy plain text to the local system clipboard, platform-independent. */
+export function copyToClipboard(text: string): boolean {
+	const platform = process.platform;
+	try {
+		if (platform === "darwin") {
+			const proc = spawnSync("pbcopy", { input: text, encoding: "utf-8" });
+			return proc.status === 0;
+		} else if (platform === "win32") {
+			const proc = spawnSync("clip", { input: text, encoding: "utf-8" });
+			return proc.status === 0;
+		} else if (platform === "linux") {
+			// Check for Wayland wl-copy, fallback to xclip, then xsel
+			const wayland = !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland");
+			if (wayland) {
+				const proc = spawnSync("wl-copy", { input: text, encoding: "utf-8" });
+				if (proc.status === 0) return true;
+			}
+			const procXclip = spawnSync("xclip", ["-selection", "clipboard"], { input: text, encoding: "utf-8" });
+			if (procXclip.status === 0) return true;
+
+			const procXsel = spawnSync("xsel", ["--clipboard", "--input"], { input: text, encoding: "utf-8" });
+			return procXsel.status === 0;
+		}
+	} catch {
+		// Ignore shell execution failures
+	}
+	return false;
+}
+
+/** Render a single step's ultra-detailed audit lines (no truncation on tasks or outputs). */
+export function renderStepAudit(step: CostStep): { title: string; lines: string[]; paths: Record<string, string> } {
+	const lines: string[] = [];
+	const paths: Record<string, string> = {};
+	const failedResults = step.results.filter((r) => r.exitCode !== 0 || r.error);
+	const marker = failedResults.length > 0 ? "✗" : "✓";
+
+	lines.push(`Step #${step.stepIndex} [${step.mode}] ${step.agent}`);
+	lines.push(`Summary: ${step.task}`);
+	lines.push("");
+
+	for (let rIndex = 0; rIndex < step.results.length; rIndex++) {
+		const r = step.results[rIndex]!;
+		const failed = r.exitCode !== 0 || !!r.error;
+		const dur = r.durationMs != null ? ` · ${(r.durationMs / 1000).toFixed(1)}s` : "";
+		const tc = r.toolCount != null ? ` · ${r.toolCount} tools` : "";
+		const tok = r.usage ? ` · ${fmtTokens(r.usage.input + r.usage.output + r.usage.cacheRead)} tok` : "";
+		const exitLbl = r.exitCode ? ` · exit ${r.exitCode}` : "";
+
+		lines.push(`${failed ? "✗" : "•"} ${r.model}${tok}${dur}${tc}${exitLbl}`);
+
+		// Per-attempt breakdown
+		if (r.attempts.length > 1 || (r.attempts.length === 1 && !r.attempts[0]!.success)) {
+			for (let i = 0; i < r.attempts.length; i++) {
+				const a = r.attempts[i]!;
+				const kind = a.success ? "ok" : failureLabel(a.error);
+				const overflow = !a.success && isContextOverflow(a.error) ? " ⚠ context overflow" : "";
+				const errSnip = a.error ? `: ${a.error.replace(/\s+/g, " ").trim()}` : "";
+				const fellBack = i < r.attempts.length - 1 && !a.success ? `  ↳ fell back to ${r.attempts[i + 1]!.model}` : "";
+				lines.push(`    attempt ${i + 1}: ${a.model} — ${kind}${overflow}${errSnip}${fellBack}`);
+			}
+		}
+
+		// Top-level error
+		if (r.error && r.attempts.length <= 1) {
+			const overflow = isContextOverflow(r.error) ? " ⚠ context overflow" : "";
+			lines.push(`    error: ${r.error.replace(/\s+/g, " ").trim()}${overflow}`);
+		}
+
+		// Full tool calls
+		if (r.toolCalls && r.toolCalls.length > 0) {
+			lines.push(`    tools: ${r.toolCalls.length} call(s)`);
+			for (const tc2 of r.toolCalls) {
+				lines.push(`      · ${tc2.text}`);
+			}
+		}
+
+		// Full task
+		if (r.task) {
+			lines.push("    task:");
+			for (const line of r.task.split("\n")) {
+				lines.push(`      ${line}`);
+			}
+		}
+
+		// Final output
+		if (r.finalOutput) {
+			lines.push("    output:");
+			for (const line of r.finalOutput.split("\n")) {
+				lines.push(`      ${line}`);
+			}
+		}
+
+		// Artifact paths
+		if (r.artifactPaths) {
+			const ap = r.artifactPaths;
+			lines.push("    artifacts on disk:");
+			if (ap.inputPath) {
+				lines.push(`      - input:      ${ap.inputPath}`);
+				paths.input = ap.inputPath;
+			}
+			if (ap.outputPath) {
+				lines.push(`      - output:     ${ap.outputPath}`);
+				paths.output = ap.outputPath;
+			}
+			if (ap.jsonlPath) {
+				lines.push(`      - session:    ${ap.jsonlPath}`);
+				paths.session = ap.jsonlPath;
+			}
+			if (ap.metadataPath) {
+				lines.push(`      - metadata:   ${ap.metadataPath}`);
+				paths.metadata = ap.metadataPath;
+			}
+		}
+	}
+
+	return { title: `Step #${step.stepIndex} Detailed Audit`, lines, paths };
+}
+
 export function renderAuditReport(report: PipelineCostReport): { title: string; lines: string[] } {
 	const lines: string[] = [];
 	if (report.steps.length === 0) {

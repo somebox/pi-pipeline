@@ -57,6 +57,8 @@ import {
 	renderProgressStatus,
 	renderCostReport,
 	renderAuditReport,
+	renderStepAudit,
+	copyToClipboard,
 	STATIC_STATUS,
 } from "./lib.ts";
 import { buildPlanFromRecipe } from "./recipes.ts";
@@ -364,11 +366,96 @@ export default function (pi: ExtensionAPI) {
 			"Audit the last pipeline run: per-step task/model/errors/tool-calls/artifacts. Surfaces context-overflow failures.",
 		handler: async (_args, ctx) => {
 			const report = lastReport.steps.length > 0 ? lastReport : currentReport;
-			const { title, lines } = renderAuditReport(report);
-			if (ctx?.ui?.select) {
-				await ctx.ui.select(title, lines);
-			} else if (ctx?.ui?.notify) {
+			if (report.steps.length === 0) {
+				ctx.ui.notify("No pipeline operation recorded yet.", "warn");
+				return;
+			}
+
+			// If select TUI isn't available, fall back to simple notification flat-dump.
+			if (!ctx.ui.select) {
+				const { title, lines } = renderAuditReport(report);
 				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			// Interactive outer step selector loop.
+			while (true) {
+				const { title, lines } = renderAuditReport(report);
+				const stepOptions = [
+					"← Go Back",
+					"View Full Flat Audit Report",
+					...report.steps.map((s) => `#${s.stepIndex} [${s.agent}] — ${s.task.slice(0, 50).replace(/\r?\n/g, " ").trim()}...`),
+				];
+
+				const choice = await ctx.ui.select("Select a step to inspect or copy details:", stepOptions);
+				if (!choice || choice === "← Go Back") break;
+
+				if (choice === "View Full Flat Audit Report") {
+					await ctx.ui.select(title, lines);
+					continue;
+				}
+
+				// Resolve the selected step index from choice (e.g. "#2 [dev] ...")
+				const match = choice.match(/^#(\d+)\s+\[/);
+				if (!match) continue;
+				const stepIndex = parseInt(match[1]!, 10);
+				const step = report.steps.find((s) => s.stepIndex === stepIndex);
+				if (!step) continue;
+
+				// Sub-menu for the selected step: view details or copy files/fields.
+				while (true) {
+					const { lines: detailLines, paths } = renderStepAudit(step);
+					const menuOptions = [
+						"← Back to Steps List",
+						"View Detailed Text Output",
+						...(step.results[0]?.task ? ["Copy: Full Task Prompt"] : []),
+						...(step.results[0]?.finalOutput ? ["Copy: Final Text Output"] : []),
+						...(paths.input ? ["Copy Path: Input Markdown File"] : []),
+						...(paths.output ? ["Copy Path: Output Markdown File"] : []),
+						...(paths.session ? ["Copy Path: Session JSONL Log"] : []),
+						...(paths.metadata ? ["Copy Path: Metadata JSON Summary"] : []),
+					];
+
+					const action = await ctx.ui.select(`Step #${step.stepIndex} Options:`, menuOptions);
+					if (!action || action === "← Back to Steps List") break;
+
+					if (action === "View Detailed Text Output") {
+						await ctx.ui.select(`Step #${step.stepIndex} Detailed View`, detailLines);
+						continue;
+					}
+
+					let toCopy: string | undefined;
+					let label = "";
+
+					if (action === "Copy: Full Task Prompt") {
+						toCopy = step.results[0]?.task;
+						label = "Task Prompt";
+					} else if (action === "Copy: Final Text Output") {
+						toCopy = step.results[0]?.finalOutput;
+						label = "Final Output";
+					} else if (action === "Copy Path: Input Markdown File") {
+						toCopy = paths.input;
+						label = "Input Path";
+					} else if (action === "Copy Path: Output Markdown File") {
+						toCopy = paths.output;
+						label = "Output Path";
+					} else if (action === "Copy Path: Session JSONL Log") {
+						toCopy = paths.session;
+						label = "Session Log Path";
+					} else if (action === "Copy Path: Metadata JSON Summary") {
+						toCopy = paths.metadata;
+						label = "Metadata Path";
+					}
+
+					if (toCopy !== undefined) {
+						const ok = copyToClipboard(toCopy);
+						if (ok) {
+							ctx.ui.notify(`Copied ${label} to clipboard!`, "info");
+						} else {
+							ctx.ui.notify(`Failed to write ${label} to clipboard.`, "error");
+						}
+					}
+				}
 			}
 		},
 	});
