@@ -1,17 +1,24 @@
 # pi-pipeline
 
-Effort-scaled multi-agent pipeline for pi. The premise: high-tier models (sonnet-5) are reserved for planning, judgment, and acceptance. Mechanical work (finding files, summarizing raw context, editing, running tests, fetching remote content) goes to util-tier (M3). Reviews, debugging, documentation, and consolidation go to research-tier (glm-5.2).
+Multi-agent pipelines for pi. Define a pipeline as a **markdown recipe** — a numbered checklist with agent annotations — and run it over anything iterable (files, screenshots, ideas, bug reports) with one focused, bounded subagent per unit and small context by construction.
 
-Best-of-N drafts happen on util-tier; the merge happens on research-tier. High tier is *only* called at the entry (plan), the merge checkpoint, and the exit (accept). This keeps expensive model calls bounded.
+The premise: a `coordinator` agent sets up each loop (the iterable + the per-unit prompt), and bounded per-unit agents (`dev`/`util`) do the work in isolation. Expensive models (`high`) are reserved for judgment and reduce. This keeps per-unit context tiny *by structure* — there's nothing else to read — instead of hoping the model self-limits. (See [SPEC.md](SPEC.md) for the full design.)
 
 ## What it is
 
 This package provides:
 
-1. **A `pipeline` tool** that the LLM can call. Returns a numbered plan with per-step cost class (`$` / `$$` / `$$$`); the LLM then executes each step with its existing `subagent` tool.
-2. **A `/pipeline` slash command** for explicit invocation, with `mode` / `effort` / `dryRun` flags.
-3. **Three tier agents** (`high`, `research`, `util`) that pi-subagents discovers automatically.
-4. **A `pipeline` skill** so the parent knows when and how to call the tool.
+1. **A `pipeline` tool** the LLM calls with a recipe name (+ inputs). Returns a numbered plan; the LLM executes each step with `subagent` calls.
+2. **A `/pipeline` slash command** — `/pipeline <recipe> <task>` runs a named recipe; `/pipeline <task>` infers a generic mode/effort pipeline.
+3. **`/pipelines`** to browse recipes, **`/pipeline-costs`** for a per-step/per-model cost breakdown, and **`/pipeline-audit`** for a per-step audit (full task, errors, per-attempt cascade, tool calls, artifact paths, context-overflow flag).
+4. **Profiles** — `dev`, `util`, `research`, `high`, (planned) `coordinator` — named agents you bind to models via `subagents.agentOverrides`.
+5. **Recipes** — markdown files in `pipelines/` (user/project/package). Ships `code-quality` and `verify-source` as examples.
+6. **A `pipeline` skill** so the parent knows when and how to call the tool.
+
+## Status
+
+- **Done:** recipes, profiles (incl. `dev`), `RunMetrics`, `/pipeline-audit`, model-limit diagnostics, `maxTools` soft budget.
+- **Next (v1.0 identity):** the **iteration runtime** — `iterate=<name>` step kind, `coordinator` profile, `{{unit}}` substitution, bounded per-unit dispatch. See [SPEC.md § Execution model](SPEC.md#execution-model-enumerate--map--reduce).
 
 ## Two modes
 
