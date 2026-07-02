@@ -40,6 +40,7 @@
 import { Type, StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import os from "node:os";
+import fs from "node:fs";
 import path from "node:path";
 import {
 	type PipelineParams,
@@ -58,7 +59,28 @@ import {
 	STATIC_STATUS,
 } from "./lib.ts";
 import { buildPlanFromRecipe } from "./recipes.ts";
-import { discoverRecipes, findProjectPipelineDirs } from "./discovery.ts";
+import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs } from "./discovery.ts";
+
+/* ──────────────────────── discovery helper ────────────────────────
+ *
+ * Build the discovery options from the live settings.json `packages` field
+ * + the standard pi install roots. Used by resolvePlan, /pipeline, and
+ * /pipelines so they all see the same recipe set. */
+function discoverAllRecipes() {
+	const home = os.homedir();
+	let packages: string[] = [];
+	try {
+		const settings = JSON.parse(fs.readFileSync(path.join(home, ".pi", "agent", "settings.json"), "utf8"));
+		packages = Array.isArray(settings?.packages) ? settings.packages.filter((p: unknown) => typeof p === "string") : [];
+	} catch { /* no settings -> no package dirs */ }
+	const npmRoot = path.join(home, ".pi", "agent", "npm", "node_modules");
+	const gitRoot = path.join(home, ".pi", "agent", "git");
+	return discoverRecipes({
+		userDir: path.join(home, ".pi", "agent", "pipelines"),
+		projectDirs: findProjectPipelineDirs(process.cwd()),
+		packageDirs: resolvePackagePipelineDirs(packages, npmRoot, gitRoot),
+	});
+}
 
 /* ──────────────────────── cost state (session-scoped) ────────────────────────
  *
@@ -86,10 +108,7 @@ interface ResolvedPlan {
 
 function resolvePlan(input: PipelineParams & { pipeline?: string; inputs?: Record<string, string> }): ResolvedPlan {
 	if (input.pipeline) {
-		const recipes = discoverRecipes({
-			userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
-			projectDirs: findProjectPipelineDirs(process.cwd()),
-		});
+		const recipes = discoverAllRecipes();
 		const recipe = recipes.find((r) => r.name === input.pipeline);
 		if (!recipe) {
 			return {
@@ -282,10 +301,7 @@ export default function (pi: ExtensionAPI) {
 			"Run a pipeline. Usage: /pipeline <recipe-name> <task>  |  /pipeline [mode] [effort] [dryrun] <task>. Browse recipes with /pipelines.",
 		getArgumentCompletions: (prefix) => {
 			const fixed = ["research", "implementation", "surface", "standard", "deep", "dryrun"];
-			const recipes = discoverRecipes({
-				userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
-				projectDirs: findProjectPipelineDirs(process.cwd()),
-			}).map((r) => r.name);
+			const recipes = discoverAllRecipes().map((r) => r.name);
 			const candidates = [...recipes, ...fixed];
 			const matches = candidates.filter((c) => c.startsWith(prefix));
 			return matches.length > 0
@@ -303,10 +319,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			// If the first token is a known recipe name, peel it off and tell the
 			// LLM to run that specific recipe with the rest as the task.
-			const recipes = discoverRecipes({
-				userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
-				projectDirs: findProjectPipelineDirs(process.cwd()),
-			});
+			const recipes = discoverAllRecipes();
 			const firstTok = trimmed.split(/\s+/, 1)[0]!;
 			const rest = trimmed.slice(firstTok.length).trim();
 			const recipe = recipes.find((r) => r.name === firstTok);
@@ -348,10 +361,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"List available pipeline recipes and built-in pipelines.",
 		handler: async (_args, ctx) => {
-			const recipes = discoverRecipes({
-				userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
-				projectDirs: findProjectPipelineDirs(process.cwd()),
-			});
+			const recipes = discoverAllRecipes();
 			const lines: string[] = [];
 			if (recipes.length > 0) {
 				lines.push("── Recipes ──");

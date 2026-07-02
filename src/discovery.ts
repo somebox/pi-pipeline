@@ -98,3 +98,49 @@ export function discoverRecipes(opts: {
 	// Stable sort by name for display.
 	return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
+
+/* ──────────────────────── package-dir resolution ────────────────────────
+ *
+ * pi doesn't expose an installed-packages accessor to extensions, so we read
+ * the `packages` field from settings.json and resolve each source to its
+ * on-disk package root, then check for a `pipelines/` subdir. Sources:
+ *   - local path ("/abs/path" or "./rel") -> that path
+ *   - "npm:<name>"           -> <npmRoot>/<name>            (npmRoot = ~/.pi/agent/npm/node_modules)
+ *   - "git:<host>/<owner>/<repo>[@ref]" -> <gitRoot>/<host>/<owner>/<repo>
+ *                                                              (gitRoot = ~/.pi/agent/git)
+ * Unknown/missing dirs are silently skipped.
+ */
+export function resolvePackagePipelineDirs(
+	packages: string[],
+	npmRoot: string,
+	gitRoot: string,
+): string[] {
+	const out: string[] = [];
+	const seen = new Set<string>();
+	const add = (pkgDir: string) => {
+		const pipelinesDir = path.join(pkgDir, "pipelines");
+		if (seen.has(pipelinesDir)) return;
+		if (fs.existsSync(pipelinesDir)) {
+			seen.add(pipelinesDir);
+			out.push(pipelinesDir);
+		}
+	};
+	for (const src of packages) {
+		const s = src.trim();
+		if (!s) continue;
+		if (s.startsWith("npm:")) {
+			const name = s.slice(4).trim();
+			if (name) add(path.join(npmRoot, name));
+		} else if (s.startsWith("git:")) {
+			// git:github.com/owner/repo[@ref]  or  git:git@github.com:owner/repo
+			const rest = s.slice(4);
+			const atIdx = rest.indexOf("@");
+			const loc = atIdx >= 0 ? rest.slice(0, atIdx) : rest;
+			if (loc) add(path.join(gitRoot, loc));
+		} else {
+			// local path (absolute or relative)
+			add(path.resolve(s));
+		}
+	}
+	return out;
+}

@@ -29,6 +29,7 @@
     "src",
     "agents",
     "skills",
+    "pipelines",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -44,6 +45,9 @@
     },
     "skills": [
       "./skills"
+    ],
+    "pipelines": [
+      "./pipelines"
     ]
   },
   "scripts": {

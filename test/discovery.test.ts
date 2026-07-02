@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { scanPipelinesDir, findProjectPipelineDirs, discoverRecipes } from "../src/discovery.ts";
+import { scanPipelinesDir, findProjectPipelineDirs, discoverRecipes, resolvePackagePipelineDirs } from "../src/discovery.ts";
 
 function mkdir(d: string): string {
 	fs.mkdirSync(d, { recursive: true });
@@ -85,4 +85,28 @@ test("findProjectPipelineDirs: walks up and collects .pi/pipelines", () => {
 	// they're distinct so both appear.
 	const out = discoverRecipes({ projectDirs: dirs });
 	assert.deepEqual(out.map((r) => r.name), ["mid", "root"]);
+});
+
+test("resolvePackagePipelineDirs: npm, git, and local-path sources", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "disc-"));
+	const npmRoot = mkdir(path.join(root, "npm"));
+	const gitRoot = mkdir(path.join(root, "git"));
+	const localPkg = mkdir(path.join(root, "local-pkg"));
+	// npm package with pipelines
+	write(path.join(npmRoot, "some-pkg", "pipelines", "a.md"), "---\nname: a\n---\n# a\n");
+	// git package with pipelines
+	write(path.join(gitRoot, "github.com", "owner", "repo", "pipelines", "b.md"), "---\nname: b\n---\n# b\n");
+	// local package with pipelines
+	write(path.join(localPkg, "pipelines", "c.md"), "---\nname: c\n---\n# c\n");
+	// npm package WITHOUT pipelines (should be skipped)
+	write(path.join(npmRoot, "no-pipelines", "package.json"), "{}");
+	const dirs = resolvePackagePipelineDirs(
+		["npm:some-pkg", "npm:no-pipelines", "git:github.com/owner/repo", localPkg],
+		npmRoot,
+		gitRoot,
+	);
+	assert.equal(dirs.length, 3);
+	assert.ok(dirs.some((d) => d.endsWith("some-pkg/pipelines")));
+	assert.ok(dirs.some((d) => d.endsWith("repo/pipelines")));
+	assert.ok(dirs.some((d) => d.endsWith("local-pkg/pipelines")));
 });
