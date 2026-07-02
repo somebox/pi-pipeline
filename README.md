@@ -240,6 +240,55 @@ pi-subagents resolves a child's model as `resolveSubagentModelOverride(params.mo
 
 This extension now defends against that: at every `subagent` `tool_call` it reads the tier→model map from the **live** `~/.pi/agent/settings.json` (`subagents.agentOverrides.<tier>.model`) and injects `model` into the tool args for the `util` / `research` / `high` agents when the caller didn't set one. So the correct tier model is used regardless of whether the parent process has reloaded its agent overrides. A `/reload` (or restart) is still recommended so pi-subagents' own mapping is consistent. `/pipeline-costs` is the quickest way to confirm which model each step actually used.
 
+## Model limits — why a step fails with "maximum context length" even when the input is small
+
+pi's bundled model definitions can disagree with what the upstream provider
+actually enforces — and that mismatch is the most common cause of subagent
+400s. The symptom is a 400 like:
+
+```
+This endpoint's maximum context length is 524288 tokens.
+However, you requested about 524686 tokens (8396 of text input, 4290 of tool
+input, 512000 in the output).
+```
+
+The input is tiny (~12k). The killer is the **512,000 output tokens** pi
+reserved. The chain:
+
+1. pi's bundled def for `minimax/minimax-m3` has `contextWindow: 1048576`
+   and `maxTokens: 512000`.
+2. pi-ai's `clampMaxTokensToContext` computes `available = contextWindow -
+   input - 4096`, then `min(maxTokens, available) = 512000`.
+3. But the real provider (Parasail via OpenRouter) enforces a **524,288**
+   window, not 1M. So `12k input + 512k output = 524,686 > 524,288` → 400.
+
+Worse, the 400 (context overflow) is **not retryable**, so neither the
+client-side `fallbackModels` nor the OpenRouter server-side `models` array
+engages — the run dies, even though kimi-k2.7-code would have fit easily.
+
+**Fix:** override the model's limits in `~/.pi/agent/models.json` so pi's
+numbers match reality and the output budget is sane for a subagent turn:
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "modelOverrides": {
+        "minimax/minimax-m3": {
+          "contextWindow": 524288,
+          "maxTokens": 65536
+        }
+      }
+    }
+  }
+}
+```
+
+Verify with `pi --list-models` — the window/output columns should reflect
+the override. `/reload` to pick it up in a running session. `/pipeline-audit`
+then shows per-step token counts against the *real* budget, and the `⚠
+context overflow` flag only fires on genuine overflow.
+
 ## Cost model
 
 The `mode` switch is the dominant cost lever. Within a mode, `effort` scales the depth:
