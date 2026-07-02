@@ -521,6 +521,50 @@ export function isTierAgent(agentName: unknown): agentName is Profile {
 	return typeof agentName === "string" && (STANDARD_PROFILES as readonly string[]).includes(agentName);
 }
 
+/* ──────────────────────── error classification ────────────────────────
+ *
+ * Provider errors come back as raw strings in attempts[].error and result.error.
+ * Classifying them lets the audit view say *why* a step failed — context
+ * overflow vs. rate-limit vs. auth — which is the diagnostic signal for the
+ * "subagents get too much context" problem.
+ */
+
+export type FailureKind =
+	| "context-overflow"   // 400: maximum context length / context length is
+	| "rate-limit"         // 429 / rate limit / too many requests / overloaded
+	| "auth"               // 401/403 / api key / unauthorized
+	| "timeout"            // timed out
+	| "model-unavailable"  // model not found / disabled / unavailable
+	| "unknown";
+
+const CONTEXT_OVERFLOW_RE = /maximum context length|context length is|context length/i;
+const RATE_LIMIT_RE = /\b429\b|rate[\s-]?limit|too many requests|overloaded|temporarily rate-limited/i;
+const AUTH_RE = /\b40[13]\b|unauthori[sz]ed|api[\s-]?key|token expired|forbidden/i;
+const TIMEOUT_RE = /timed?\s*out|deadline exceeded/i;
+const MODEL_UNAVAILABLE_RE = /model.*(not found|disabled|unavailable)|unknown model|provider.*unavailable/i;
+
+/** Classify a raw error string into a failure kind. */
+export function classifyFailure(error: string | undefined | null): FailureKind {
+	if (!error) return "unknown";
+	if (CONTEXT_OVERFLOW_RE.test(error)) return "context-overflow";
+	if (RATE_LIMIT_RE.test(error)) return "rate-limit";
+	if (AUTH_RE.test(error)) return "auth";
+	if (TIMEOUT_RE.test(error)) return "timeout";
+	if (MODEL_UNAVAILABLE_RE.test(error)) return "model-unavailable";
+	return "unknown";
+}
+
+/** True if the error indicates the prompt exceeded the model's context window. */
+export function isContextOverflow(error: string | undefined | null): boolean {
+	return classifyFailure(error) === "context-overflow";
+}
+
+/** Human-readable label for a failure kind. */
+export function failureLabel(error: string | undefined | null): string {
+	const kind = classifyFailure(error);
+	return kind === "unknown" ? "failed" : kind;
+}
+
 /* ──────────────────────── cost tracking ────────────────────────
  *
  * Accumulate per-dispatch subagent cost from `tool_result` events so the
@@ -540,11 +584,32 @@ export interface ModelUsageTotals {
 	calls: number;
 }
 
+export interface AttemptEntry {
+	model: string;
+	success: boolean;
+	exitCode?: number | null;
+	error?: string;            // raw per-attempt error (e.g. the 429 or 400 message)
+	usage?: ModelUsageTotals;
+}
+
+export interface ArtifactPaths {
+	inputPath?: string;       // the exact task/prompt given to the subagent
+	outputPath?: string;      // the subagent's final output
+	jsonlPath?: string;       // full child session — every message/tool call/response
+	metadataPath?: string;    // run summary (agent/task/usage/model)
+}
+
+export interface ToolCallSummary {
+	text: string;             // one-line summary of the call
+	expandedText?: string;    // longer form, if available
+}
+
 export interface CostResultEntry {
 	agent: string;
 	model: string; // normalized display model
-	task: string;
+	task: string;  // FULL task text (not snippet) — audit needs it
 	exitCode: number | null;
+	error?: string;           // top-level result error (the final failure)
 	usage?: {
 		input: number;
 		output: number;
@@ -555,7 +620,11 @@ export interface CostResultEntry {
 	};
 	durationMs?: number;
 	toolCount?: number;
-	attempts: Array<{ model: string; success: boolean; usage?: ModelUsageTotals }>;
+	finalOutput?: string;     // the subagent's final text response
+	toolCalls?: ToolCallSummary[]; // per-call summary
+	sessionFile?: string;    // child session JSONL (full conversation)
+	artifactPaths?: ArtifactPaths;
+	attempts: AttemptEntry[];
 }
 
 export interface CostStep {
@@ -705,8 +774,9 @@ export function mapResultEntry(r: any): CostResultEntry {
 	const entry: CostResultEntry = {
 		agent: r?.agent ?? "?",
 		model: normalizeModel(r?.model),
-		task: snippet(r?.task, 96),
+		task: typeof r?.task === "string" ? r.task : "",  // FULL task, not snippet — audit needs it
 		exitCode: r?.exitCode ?? null,
+		error: typeof r?.error === "string" ? r.error : undefined,
 		usage: r?.usage && typeof r.usage === "object"
 			? {
 				input: r.usage.input ?? 0,
@@ -719,6 +789,18 @@ export function mapResultEntry(r: any): CostResultEntry {
 			: undefined,
 		durationMs: r?.progressSummary?.durationMs,
 		toolCount: r?.progressSummary?.toolCount,
+		finalOutput: typeof r?.finalOutput === "string" ? r.finalOutput : undefined,
+		toolCalls: Array.isArray(r?.toolCalls) ? r.toolCalls.map((tc: any) => ({
+			text: typeof tc?.text === "string" ? tc.text : "",
+			expandedText: typeof tc?.expandedText === "string" ? tc.expandedText : undefined,
+		})) : undefined,
+		sessionFile: typeof r?.sessionFile === "string" ? r.sessionFile : undefined,
+		artifactPaths: r?.artifactPaths && typeof r.artifactPaths === "object" ? {
+			inputPath: typeof r.artifactPaths.inputPath === "string" ? r.artifactPaths.inputPath : undefined,
+			outputPath: typeof r.artifactPaths.outputPath === "string" ? r.artifactPaths.outputPath : undefined,
+			jsonlPath: typeof r.artifactPaths.jsonlPath === "string" ? r.artifactPaths.jsonlPath : undefined,
+			metadataPath: typeof r.artifactPaths.metadataPath === "string" ? r.artifactPaths.metadataPath : undefined,
+		} : undefined,
 		attempts: [],
 	};
 	const ma = Array.isArray(r?.modelAttempts) ? r.modelAttempts : [];
@@ -726,6 +808,8 @@ export function mapResultEntry(r: any): CostResultEntry {
 		entry.attempts.push({
 			model: normalizeModel(a?.model),
 			success: !!a?.success,
+			exitCode: a?.exitCode ?? null,
+			error: typeof a?.error === "string" ? a.error : undefined,
 			usage: a?.usage
 				? {
 						...emptyTotals(),
@@ -839,6 +923,91 @@ export function renderCostReport(report: PipelineCostReport): { title: string; l
 	lines.push("", `── Total ──`);
 	lines.push(`${fmtCost(grand.cost)} · ${fmtTokens(grand.tokens)} tok · ${report.steps.length} step(s) · ${grand.calls} call(s)`);
 	return { title: `Pipeline costs — ${report.steps.length} dispatch(es) · ${fmtCost(grand.cost)}`, lines };
+}
+
+/* ──────────────────────── audit rendering ────────────────────────
+ *
+ * A per-step browser of one pipeline run's audit data: the full task each
+ * subagent received, its resolved model, per-attempt outcomes (with raw
+ * errors and a context-overflow flag), tool calls, final output, and paths to
+ * the on-disk artifacts (input.md / output.md / session.jsonl / meta.json)
+ * for deep drill-down. Failed steps are emphasized so a 429→400 cascade is
+ * immediately visible. Designed for `ctx.ui.select`.
+ */
+
+/** Truncate a long string for inline display, keeping head + tail. */
+function truncateMiddle(s: string, max: number): string {
+	if (s.length <= max) return s;
+	const head = Math.ceil((max - 1) / 2);
+	const tail = Math.floor((max - 1) / 2);
+	return s.slice(0, head) + "…" + s.slice(s.length - tail);
+}
+
+export function renderAuditReport(report: PipelineCostReport): { title: string; lines: string[] } {
+	const lines: string[] = [];
+	if (report.steps.length === 0) {
+		return { title: "Pipeline audit — no pipeline op recorded yet", lines: ["Run /pipeline <task> first, then /pipeline-audit."] };
+	}
+	lines.push(`Pipeline audit · ${report.planName ?? "generic"}${report.planMode ? ` · ${report.planMode}/${report.planEffort ?? ""}` : ""} · ${report.steps.length} dispatch(es)${report.dryRun ? " · DRY RUN" : ""}`);
+	lines.push("");
+	for (const step of report.steps) {
+		const failedResults = step.results.filter((r) => r.exitCode !== 0 || r.error);
+		const marker = failedResults.length > 0 ? "✗" : "✓";
+		lines.push(`${marker} #${step.stepIndex} [${step.mode}] ${step.agent} — ${snippet(step.task, 90)}`);
+		for (const r of step.results) {
+			const failed = r.exitCode !== 0 || !!r.error;
+			const dur = r.durationMs != null ? ` · ${(r.durationMs / 1000).toFixed(1)}s` : "";
+			const tc = r.toolCount != null ? ` · ${r.toolCount} tools` : "";
+			const tok = r.usage ? ` · ${fmtTokens(r.usage.input + r.usage.output + r.usage.cacheRead)} tok` : "";
+			const exitLbl = r.exitCode ? ` · exit ${r.exitCode}` : "";
+			lines.push(`    ${failed ? "✗" : "•"} ${r.model}${tok}${dur}${tc}${exitLbl}`);
+			// Per-attempt breakdown — the 429→400 cascade lives here.
+			if (r.attempts.length > 1 || (r.attempts.length === 1 && !r.attempts[0]!.success)) {
+				for (let i = 0; i < r.attempts.length; i++) {
+					const a = r.attempts[i]!;
+					const kind = a.success ? "ok" : failureLabel(a.error);
+					const overflow = !a.success && isContextOverflow(a.error) ? " ⚠ context overflow" : "";
+					const errSnip = a.error ? `: ${snippet(a.error.replace(/\s+/g, " "), 100)}` : "";
+					const fellBack = i < r.attempts.length - 1 && !a.success ? `  ↳ fell back to ${r.attempts[i + 1]!.model}` : "";
+					lines.push(`        attempt ${i + 1}: ${a.model} — ${kind}${overflow}${errSnip}${fellBack}`);
+				}
+			}
+			// Top-level error (the final failure).
+			if (r.error && r.attempts.length <= 1) {
+				const overflow = isContextOverflow(r.error) ? " ⚠ context overflow" : "";
+				lines.push(`        error: ${snippet(r.error.replace(/\s+/g, " "), 120)}${overflow}`);
+			}
+			// Tool calls — one line each.
+			if (r.toolCalls && r.toolCalls.length > 0) {
+				lines.push(`        tools: ${r.toolCalls.length} call(s)`);
+				for (const tc2 of r.toolCalls.slice(0, 8)) {
+					lines.push(`          · ${snippet(tc2.text.replace(/\s+/g, " "), 100)}`);
+				}
+				if (r.toolCalls.length > 8) lines.push(`          · … ${r.toolCalls.length - 8} more`);
+			}
+			// Full task (audit needs it; truncated for the inline view).
+			if (r.task) lines.push(`        task: ${truncateMiddle(r.task.replace(/\s+/g, " "), 160)}`);
+			// Final output (truncated).
+			if (r.finalOutput) lines.push(`        output: ${truncateMiddle(r.finalOutput.replace(/\s+/g, " "), 160)}`);
+			// Artifact paths for deep drill-down.
+			if (r.artifactPaths) {
+				const ap = r.artifactPaths;
+				const paths: string[] = [];
+				if (ap.inputPath) paths.push(`input`);
+				if (ap.outputPath) paths.push(`output`);
+				if (ap.jsonlPath) paths.push(`session.jsonl`);
+				if (ap.metadataPath) paths.push(`meta`);
+				if (paths.length) lines.push(`        artifacts: ${paths.join(", ")} (under subagent-artifacts/)`);
+			}
+		}
+		lines.push("");
+	}
+	// Summary: count failed steps and context overflows.
+	const failedSteps = report.steps.filter((s) => s.results.some((r) => r.exitCode !== 0 || r.error)).length;
+	const overflows = report.steps.reduce((a, s) => a + s.results.reduce((b, r) => b + r.attempts.filter((x) => !x.success && isContextOverflow(x.error)).length + (isContextOverflow(r.error) ? 1 : 0), 0), 0);
+	lines.push(`── Summary ──`);
+	lines.push(`${failedSteps} of ${report.steps.length} step(s) failed · ${overflows} context overflow(s)`);
+	return { title: `Pipeline audit — ${report.steps.length} dispatch(es) · ${failedSteps} failed`, lines };
 }
 
 /* ──────────────────────── plan building ──────────────────────── */

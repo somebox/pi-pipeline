@@ -18,10 +18,11 @@ import os from "node:os";
 import path from "node:path";
 import {
 	inferEffort, inferMode, normalizeModel, fmtTokens, fmtCost,
-	summarizeCost, buildPlan, mapResultEntry, rollupByModel, renderCostReport,
+	summarizeCost, buildPlan, mapResultEntry, rollupByModel, renderCostReport, renderAuditReport,
 	loadTierModels, loadModelFallbackOverrides, fallbacksFor, isTierAgent,
 	injectTierModels, buildCostStep, newReport,
 	toRunMetrics, metricsByModel, metricsTotalCost, metricsTotalDurationMs,
+	classifyFailure, isContextOverflow, failureLabel,
 	STANDARD_PROFILES, DEFAULT_TIER_MODELS,
 	IMPL_TEMPLATES, RESEARCH_TEMPLATES,
 } from "../src/lib.ts";
@@ -397,4 +398,147 @@ test("metricsByModel: empty run yields empty map, zero totals", () => {
 	assert.equal(metricsByModel(metrics).size, 0);
 	assert.equal(metricsTotalCost(metrics), 0);
 	assert.equal(metricsTotalDurationMs(metrics), 0);
+});
+
+/* ───────────────────────── error classification ───────────────────────── */
+
+test("classifyFailure: context-overflow from the real 400 message", () => {
+	const err = '400: {"message":"This endpoint\'s maximum context length is 524288 tokens. However, you requested about 524458 tokens..."}';
+	assert.equal(classifyFailure(err), "context-overflow");
+	assert.equal(isContextOverflow(err), true);
+	assert.equal(failureLabel(err), "context-overflow");
+});
+
+test("classifyFailure: rate-limit from the real 429/Parasail message", () => {
+	const err = "Provider returned error. minimax/minimax-m3 is temporarily rate-limited upstream. 429";
+	assert.equal(classifyFailure(err), "rate-limit");
+	assert.equal(isContextOverflow(err), false);
+});
+
+test("classifyFailure: auth, timeout, model-unavailable, unknown", () => {
+	assert.equal(classifyFailure("401 Unauthorized: invalid api key"), "auth");
+	assert.equal(classifyFailure("403 Forbidden"), "auth");
+	assert.equal(classifyFailure("Request timed out after 60s"), "timeout");
+	assert.equal(classifyFailure("model minimax-m3 not found"), "model-unavailable");
+	assert.equal(classifyFailure("something weird happened"), "unknown");
+});
+
+test("classifyFailure: undefined/empty -> unknown", () => {
+	assert.equal(classifyFailure(undefined), "unknown");
+	assert.equal(classifyFailure(null), "unknown");
+	assert.equal(classifyFailure(""), "unknown");
+});
+
+/* ───────────────────────── audit capture (mapResultEntry) ───────────────────────── */
+
+test("mapResultEntry: captures error, attempts[].error, full task, finalOutput, toolCalls, sessionFile, artifactPaths", () => {
+	const r = {
+		agent: "util", model: "openrouter/minimax/minimax-m3:low", task: "x".repeat(200), exitCode: 1,
+		error: "400: maximum context length is 524288 tokens",
+		usage: { input: 1000, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.01, turns: 1 },
+		progressSummary: { toolCount: 2, durationMs: 5000 },
+		finalOutput: "partial output here",
+		toolCalls: [{ text: "read spec.md", expandedText: "read spec.md offset=1 limit=100" }],
+		sessionFile: "/path/to/session.jsonl",
+		artifactPaths: { inputPath: "/a/in.md", outputPath: "/a/out.md", jsonlPath: "/a/s.jsonl", metadataPath: "/a/m.json" },
+		modelAttempts: [
+			{ model: "openrouter/minimax/minimax-m3", success: false, exitCode: 1, error: "429 rate-limited", usage: { input: 500, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.005, turns: 1 } },
+			{ model: "openrouter/kimi/kimi-k2.7", success: false, exitCode: 1, error: "400: maximum context length", usage: { input: 1000, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.01, turns: 1 } },
+		],
+	};
+	const e = mapResultEntry(r);
+	assert.equal(e.exitCode, 1);
+	assert.equal(e.error, "400: maximum context length is 524288 tokens");
+	assert.equal(e.task.length, 200, "task should be FULL, not snippeted");
+	assert.equal(e.finalOutput, "partial output here");
+	assert.equal(e.sessionFile, "/path/to/session.jsonl");
+	assert.deepEqual(e.artifactPaths, { inputPath: "/a/in.md", outputPath: "/a/out.md", jsonlPath: "/a/s.jsonl", metadataPath: "/a/m.json" });
+	assert.equal(e.toolCalls?.length, 1);
+	assert.equal(e.toolCalls?.[0].text, "read spec.md");
+	assert.equal(e.attempts.length, 2);
+	assert.equal(e.attempts[0].success, false);
+	assert.equal(e.attempts[0].error, "429 rate-limited");
+	assert.equal(e.attempts[0].exitCode, 1);
+	assert.equal(e.attempts[1].error, "400: maximum context length");
+});
+
+test("mapResultEntry: missing audit fields are undefined, not crashes", () => {
+	const e = mapResultEntry({ agent: "util", model: "m", task: "t", exitCode: 0 });
+	assert.equal(e.error, undefined);
+	assert.equal(e.finalOutput, undefined);
+	assert.equal(e.toolCalls, undefined);
+	assert.equal(e.sessionFile, undefined);
+	assert.equal(e.artifactPaths, undefined);
+	assert.deepEqual(e.attempts, []);
+});
+
+test("mapResultEntry: a context-overflow step is classifiable from the captured error", () => {
+	const e = mapResultEntry({ agent: "util", model: "m", task: "t", exitCode: 1, error: "400: maximum context length is 524288 tokens" });
+	assert.equal(isContextOverflow(e.error), true);
+	assert.equal(isContextOverflow(e.attempts[0]?.error), false);  // no attempts
+});
+
+/* ───────────────────────── renderAuditReport ───────────────────────── */
+
+test("renderAuditReport: empty report has a friendly message", () => {
+	const { title, lines } = renderAuditReport({ steps: [] });
+	assert.match(title, /no pipeline op recorded yet/);
+	assert.ok(lines.length > 0);
+});
+
+test("renderAuditReport: surfaces a 429→400 context-overflow cascade", () => {
+	const report = {
+		planName: "code-quality",
+		steps: [{
+			stepIndex: 1, mode: "single", agent: "util", task: "Review code for issues",
+			results: [{
+				agent: "util", model: "minimax/minimax-m3", task: "Review code for issues", exitCode: 1,
+				error: "400: maximum context length is 524288 tokens",
+				usage: { input: 524458, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.5, turns: 1 },
+				progressSummary: { toolCount: 0, durationMs: 2000 },
+				finalOutput: undefined,
+				toolCalls: [{ text: "read bigfile.ts" }],
+				artifactPaths: { inputPath: "/a/in.md", outputPath: "/a/out.md", jsonlPath: "/a/s.jsonl", metadataPath: "/a/m.json" },
+				attempts: [
+					{ model: "minimax/minimax-m3", success: false, exitCode: 1, error: "429 rate-limited upstream" },
+					{ model: "kimi/kimi-k2.7", success: false, exitCode: 1, error: "400: maximum context length is 524288 tokens" },
+				],
+			}],
+		}],
+	};
+	const { title, lines } = renderAuditReport(report);
+	const joined = lines.join("\n");
+	// Failed step marker
+	assert.ok(joined.includes("✗ #1"), "failed step should be marked ✗");
+	// The cascade: attempt 1 rate-limit, attempt 2 context-overflow with the ⚠ flag
+	assert.ok(joined.includes("rate-limit"), "first attempt classified as rate-limit");
+	assert.ok(joined.includes("context-overflow"), "second attempt classified as context-overflow");
+	assert.ok(joined.includes("⚠ context overflow"), "context-overflow flag rendered");
+	assert.ok(joined.includes("fell back to"), "fallback noted");
+	// Summary counts
+	assert.match(title, /1 failed/);
+	assert.ok(joined.includes("1 of 1 step(s) failed"), "summary line");
+	assert.ok(joined.includes("context overflow(s)"), "overflow count in summary");
+	// Artifacts mentioned
+	assert.ok(joined.includes("artifacts:"), "artifact paths listed");
+});
+
+test("renderAuditReport: successful step shows ✓ and no error block", () => {
+	const report = {
+		steps: [{
+			stepIndex: 1, mode: "single", agent: "dev", task: "do work",
+			results: [{
+				agent: "dev", model: "kimi/kimi-k2.7", task: "do work", exitCode: 0,
+				usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, cost: 0.01, turns: 2 },
+				progressSummary: { toolCount: 3, durationMs: 10000 },
+				finalOutput: "done",
+				attempts: [{ model: "kimi/kimi-k2.7", success: true, exitCode: 0 }],
+			}],
+		}],
+	};
+	const { lines } = renderAuditReport(report);
+	const joined = lines.join("\n");
+	assert.ok(joined.includes("✓ #1"), "successful step marked ✓");
+	assert.ok(!joined.includes("error:"), "no error block for a successful step");
+	assert.ok(joined.includes("0 of 1 step(s) failed"), "summary shows 0 failed");
 });

@@ -56,6 +56,7 @@ import {
 	buildCostStep,
 	renderProgressStatus,
 	renderCostReport,
+	renderAuditReport,
 	STATIC_STATUS,
 } from "./lib.ts";
 import { buildPlanFromRecipe } from "./recipes.ts";
@@ -143,7 +144,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setStatus("pipeline", ctx.ui.theme.fg("dim", STATIC_STATUS));
 		}
 		ctx.ui.notify(
-			"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-costs — breakdown of the last pipeline op by step and model.\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
+			"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-costs — cost breakdown of the last run.\n/pipeline-audit — per-step audit (tasks/errors/tool-calls/artifacts).\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
 			"info",
 		);
 	});
@@ -346,6 +347,24 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const report = lastReport.steps.length > 0 ? lastReport : currentReport;
 			const { title, lines } = renderCostReport(report);
+			if (ctx?.ui?.select) {
+				await ctx.ui.select(title, lines);
+			} else if (ctx?.ui?.notify) {
+				ctx.ui.notify(lines.join("\n"), "info");
+			}
+		},
+	});
+
+	// 4b. `/pipeline-audit` — per-step audit of the last pipeline operation:
+	// the full task each subagent received, resolved model, per-attempt outcomes
+	// (with raw errors and a context-overflow flag), tool calls, final output,
+	// and artifact paths. Surfaces 429→400 cascades and context-bloat failures.
+	pi.registerCommand("pipeline-audit", {
+		description:
+			"Audit the last pipeline run: per-step task/model/errors/tool-calls/artifacts. Surfaces context-overflow failures.",
+		handler: async (_args, ctx) => {
+			const report = lastReport.steps.length > 0 ? lastReport : currentReport;
+			const { title, lines } = renderAuditReport(report);
 			if (ctx?.ui?.select) {
 				await ctx.ui.select(title, lines);
 			} else if (ctx?.ui?.notify) {
