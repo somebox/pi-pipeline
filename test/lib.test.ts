@@ -518,7 +518,7 @@ test("renderAuditReport: surfaces a 429→400 context-overflow cascade", () => {
 	// Summary counts
 	assert.match(title, /1 failed/);
 	assert.ok(joined.includes("1 of 1 step(s) failed"), "summary line");
-	assert.ok(joined.includes("context overflow(s)"), "overflow count in summary");
+	assert.ok(joined.includes("1 context overflow(s)"), "overflow counted once (not double-counted with attempts)");
 	// Artifacts mentioned
 	assert.ok(joined.includes("artifacts:"), "artifact paths listed");
 });

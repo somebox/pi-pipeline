@@ -943,6 +943,14 @@ function truncateMiddle(s: string, max: number): string {
 	return s.slice(0, head) + "…" + s.slice(s.length - tail);
 }
 
+/** Truncate to the head only (no tail). Used for task text, where the tail is
+ *  often appended boilerplate (e.g. pi-subagents' output-path instructions)
+ *  that makes middle-truncation misleading. */
+function truncateHead(s: string, max: number): string {
+	if (s.length <= max) return s;
+	return s.slice(0, max - 1) + "…";
+}
+
 export function renderAuditReport(report: PipelineCostReport): { title: string; lines: string[] } {
 	const lines: string[] = [];
 	if (report.steps.length === 0) {
@@ -986,7 +994,7 @@ export function renderAuditReport(report: PipelineCostReport): { title: string; 
 				if (r.toolCalls.length > 8) lines.push(`          · … ${r.toolCalls.length - 8} more`);
 			}
 			// Full task (audit needs it; truncated for the inline view).
-			if (r.task) lines.push(`        task: ${truncateMiddle(r.task.replace(/\s+/g, " "), 160)}`);
+			if (r.task) lines.push(`        task: ${truncateHead(r.task.replace(/\s+/g, " "), 160)}`);
 			// Final output (truncated).
 			if (r.finalOutput) lines.push(`        output: ${truncateMiddle(r.finalOutput.replace(/\s+/g, " "), 160)}`);
 			// Artifact paths for deep drill-down.
@@ -1002,9 +1010,15 @@ export function renderAuditReport(report: PipelineCostReport): { title: string; 
 		}
 		lines.push("");
 	}
-	// Summary: count failed steps and context overflows.
+	// Summary: count failed steps and context overflows. An overflow is counted
+	// once per failed result (the top-level error and the last attempt's error
+	// are the same failure — don't sum both).
 	const failedSteps = report.steps.filter((s) => s.results.some((r) => r.exitCode !== 0 || r.error)).length;
-	const overflows = report.steps.reduce((a, s) => a + s.results.reduce((b, r) => b + r.attempts.filter((x) => !x.success && isContextOverflow(x.error)).length + (isContextOverflow(r.error) ? 1 : 0), 0), 0);
+	const overflows = report.steps.reduce((a, s) => a + s.results.reduce((b, r) => {
+		if (isContextOverflow(r.error)) return b + 1;
+		if (r.attempts.some((x) => !x.success && isContextOverflow(x.error))) return b + 1;
+		return b;
+	}, 0), 0);
 	lines.push(`── Summary ──`);
 	lines.push(`${failedSteps} of ${report.steps.length} step(s) failed · ${overflows} context overflow(s)`);
 	return { title: `Pipeline audit — ${report.steps.length} dispatch(es) · ${failedSteps} failed`, lines };
