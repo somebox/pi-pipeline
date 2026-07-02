@@ -45,6 +45,7 @@ export interface PlanStep {
 	output?: string;
 	reads?: string[];
 	parallel?: number;
+	maxTools?: number;    // optional tool-call budget for this step (soft enforcement via task prompt)
 }
 
 export interface Plan {
@@ -1026,6 +1027,43 @@ export function renderAuditReport(report: PipelineCostReport): { title: string; 
 
 /* ──────────────────────── plan building ──────────────────────── */
 
+/* ──────────────────────── tool-call budget ────────────────────────
+ *
+ * Soft enforcement of smaller batch sizes. When a step has maxTools, prepend
+ * a hard, countable instruction to its task. The audit captures toolCount per
+ * step, so compliance is directly measurable. If the model self-limits, this
+ * is a cheap per-step lever; if not, escalate to a bounded agent variant
+ * (tools: read, grep, write — no ls/find/bash).
+ */
+
+/** The budget instruction text (no TASK prefix). Empty string when no budget. */
+export function toolBudgetInstruction(maxTools: number | undefined): string {
+	if (maxTools == null) return "";
+	return `TOOL BUDGET: You may make at most ${maxTools} tool calls total for this step. ` +
+		`Count every read, ls, grep, find, and bash call. Plan your calls: prefer grep to locate, then read only what you need. ` +
+		`When you have made ${maxTools} calls, STOP exploring immediately and write your output with what you have. ` +
+		`Do not exceed ${maxTools} calls. Fewer is better if the output is ready.`;
+}
+
+/** Compose a step's final task text from its base task, optional hints, and an
+ *  optional tool budget. When either hints or a budget is present, they prefix
+ *  the task and a `TASK:` marker separates them from the base task. When
+ *  neither is present, the base task is returned unchanged. */
+export function composeStepTask(task: string, hints?: string[], maxTools?: number): string {
+	const parts: string[] = [];
+	const hintBlock = (hints ?? []).map((h) => h.trim()).filter(Boolean);
+	if (hintBlock.length > 0) parts.push(`HINTS:\n${hintBlock.map((h) => `- ${h}`).join("\n")}`);
+	const budget = toolBudgetInstruction(maxTools);
+	if (budget) parts.push(budget);
+	if (parts.length === 0) return task;
+	return `${parts.join("\n\n")}\n\nTASK: ${task}`;
+}
+
+/** Back-compat alias: inject a budget into a task (no hints). */
+export function withToolBudget(task: string, maxTools: number | undefined): string {
+	return composeStepTask(task, undefined, maxTools);
+}
+
 export function buildPlan(params: PipelineParams): Plan {
 	const effort: Effort = params.effort ?? inferEffort(params.task);
 	const mode: Mode = params.mode ?? inferMode(params.task);
@@ -1033,20 +1071,15 @@ export function buildPlan(params: PipelineParams): Plan {
 		mode === "research" ? RESEARCH_TEMPLATES[effort] : IMPL_TEMPLATES[effort];
 	const hints = (params.hints ?? []).map((h) => h.trim()).filter(Boolean);
 
-	// Inject hints into each step's task, prefixed with HINTS: so the
-	// subagent sees them as a separate, parseable block.
-	if (hints.length > 0) {
-		const hintBlock = `HINTS:\n${hints.map((h) => `- ${h}`).join("\n")}`;
-		return {
-			...template,
-			steps: template.steps.map((step) => ({
-				...step,
-				task: `${hintBlock}\n\nTASK: ${step.task}`,
-			})),
-		};
-	}
-
-	return template;
+	// Compose each step's task: hints + per-step tool budget (maxTools) + base
+	// task. composeStepTask handles the prefix/TASK: marker consistently.
+	return {
+		...template,
+		steps: template.steps.map((step) => ({
+			...step,
+			task: composeStepTask(step.task, hints, step.maxTools),
+		})),
+	};
 }
 
 export function summarizeCost(plan: Plan): string {
@@ -1101,10 +1134,12 @@ export function renderPlan(plan: Plan, task: string, dryRun: boolean): string {
 	for (let i = 0; i < plan.steps.length; i++) {
 		const s = plan.steps[i];
 		const parallelTag = s.parallel ? ` [parallel #${s.parallel}]` : "";
+		const budgetTag = s.maxTools != null ? ` [budget: ${s.maxTools} tools]` : "";
 		lines.push(
-			`### Step ${i + 1} — ${s.phase}: ${s.label}${parallelTag}  (${s.agent})`,
+			`### Step ${i + 1} — ${s.phase}: ${s.label}${parallelTag}${budgetTag}  (${s.agent})`,
 		);
 		lines.push(`- **Agent:** \`${s.agent}\``);
+		if (s.maxTools != null) lines.push(`- **Tool budget:** ${s.maxTools} calls (soft)`);
 		if (s.output) lines.push(`- **Writes:** ${s.output}`);
 		if (s.reads?.length) lines.push(`- **Reads:** ${s.reads.join(", ")}`);
 		lines.push("");

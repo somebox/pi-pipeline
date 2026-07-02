@@ -49,18 +49,18 @@ body`);
 /* ───────────────────────── step header tail ───────────────────────── */
 
 test("parseStepHeaderTail: agent only", () => {
-	assert.deepEqual(parseStepHeaderTail("(util)"), { agent: "util", parallel: false, reads: [], output: undefined });
+	assert.deepEqual(parseStepHeaderTail("(util)"), { agent: "util", parallel: false, reads: [], output: undefined, maxTools: undefined });
 });
 
 test("parseStepHeaderTail: agent + parallel + flags", () => {
 	assert.deepEqual(parseStepHeaderTail("(dev, parallel, reads=a.md,b.md, output=c.md)"), {
-		agent: "dev", parallel: true, reads: ["a.md", "b.md"], output: "c.md",
+		agent: "dev", parallel: true, reads: ["a.md", "b.md"], output: "c.md", maxTools: undefined,
 	});
 });
 
 test("parseStepHeaderTail: custom agent name", () => {
 	assert.deepEqual(parseStepHeaderTail("(my-custom-agent)"), {
-		agent: "my-custom-agent", parallel: false, reads: [], output: undefined,
+		agent: "my-custom-agent", parallel: false, reads: [], output: undefined, maxTools: undefined,
 	});
 });
 
@@ -220,4 +220,57 @@ test("buildPlanFromRecipe: missing input left as {{name}}", () => {
 		// no inputs provided
 	});
 	assert.match(plan.steps[0].task, /\{\{scope\}\}/);
+});
+
+/* ───────────────────────── maxTools budget ───────────────────────── */
+
+test("parseStepHeaderTail: parses maxTools=N", () => {
+	assert.deepEqual(parseStepHeaderTail("(util, maxTools=5)"), {
+		agent: "util", parallel: false, reads: [], output: undefined, maxTools: 5,
+	});
+	assert.deepEqual(parseStepHeaderTail("(util, parallel, reads=a.md, maxTools=10, output=b.md)"), {
+		agent: "util", parallel: true, reads: ["a.md"], output: "b.md", maxTools: 10,
+	});
+});
+
+test("parseStepHeaderTail: invalid maxTools is ignored (not a positive integer)", () => {
+	assert.equal(parseStepHeaderTail("(util, maxTools=0)")!.maxTools, undefined);
+	assert.equal(parseStepHeaderTail("(util, maxTools=abc)")!.maxTools, undefined);
+});
+
+test("buildPlanFromRecipe: maxTools flows through to PlanStep", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, maxTools=3)\nread files and write out.md",
+		nameFallback: "x",
+	});
+	assert.equal(plan.steps[0].maxTools, 3);
+});
+
+test("buildPlanFromRecipe: budget instruction injected into task when maxTools set", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, maxTools=5)\nread files and write out.md",
+		nameFallback: "x",
+	});
+	assert.match(plan.steps[0].task, /TOOL BUDGET: You may make at most 5 tool calls total/);
+	assert.match(plan.steps[0].task, /Do not exceed 5 calls/);
+});
+
+test("buildPlanFromRecipe: no maxTools means no budget instruction", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util)\nread files and write out.md",
+		nameFallback: "x",
+	});
+	assert.doesNotMatch(plan.steps[0].task, /TOOL BUDGET/);
+	assert.equal(plan.steps[0].maxTools, undefined);
+});
+
+test("buildPlanFromRecipe: budget composes with hints (hints then budget)", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, maxTools=4)\nread files and write out.md",
+		nameFallback: "x",
+		hints: ["no new deps"],
+	});
+	const t = plan.steps[0].task;
+	assert.match(t, /^HINTS:\n- no new deps\n\n/);
+	assert.match(t, /TOOL BUDGET:.*at most 4 tool calls/);
 });

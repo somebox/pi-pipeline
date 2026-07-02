@@ -16,7 +16,7 @@
  * as flags; explicit flags always win.
  */
 
-import type { Plan, PlanStep } from "./lib.ts";
+import { type Plan, type PlanStep, composeStepTask } from "./lib.ts";
 
 /** Parsed recipe frontmatter. All fields optional. */
 export interface RecipeFrontmatter {
@@ -93,10 +93,11 @@ export interface ParsedStepHeader {
 	parallel: boolean;
 	reads: string[];
 	output: string | undefined;
+	maxTools: number | undefined;
 }
 
 /** Parse a `(agent, flags)` header tail. Returns null if no parenthesized tail. */
-export function parseStepHeaderTail(tail: string): { agent: string; parallel: boolean; reads: string[]; output: string | undefined } | null {
+export function parseStepHeaderTail(tail: string): { agent: string; parallel: boolean; reads: string[]; output: string | undefined; maxTools: number | undefined } | null {
 	const m = tail.match(/^\(([^)]*)\)\s*$/);
 	if (!m) return null;
 	const parts = m[1]!.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
@@ -105,13 +106,18 @@ export function parseStepHeaderTail(tail: string): { agent: string; parallel: bo
 	let parallel = false;
 	let reads: string[] = [];
 	let output: string | undefined;
+	let maxTools: number | undefined;
 	for (let i = 1; i < parts.length; i++) {
 		const p = parts[i]!;
 		if (p === "parallel") parallel = true;
 		else if (p.startsWith("reads=")) reads = p.slice(6).split(",").map((s) => s.trim()).filter(Boolean);
 		else if (p.startsWith("output=")) output = p.slice(7).trim();
+		else if (p.startsWith("maxTools=")) {
+			const n = Number.parseInt(p.slice(9), 10);
+			if (Number.isFinite(n) && n > 0) maxTools = n;
+		}
 	}
-	return { agent, parallel, reads, output };
+	return { agent, parallel, reads, output, maxTools };
 }
 
 /* ───────────────────────── prose inference ───────────────────────── */
@@ -174,6 +180,7 @@ export function parseSteps(body: string): Array<{ header: ParsedStepHeader; task
 			parallel: parsed?.parallel ?? false,
 			reads: parsed?.reads ?? [],
 			output: parsed?.output,
+			maxTools: parsed?.maxTools,
 		};
 		// Collect body paragraphs until the next `## ` step.
 		i++;
@@ -215,17 +222,16 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 			output,
 			reads: reads.length > 0 ? reads : undefined,
 			parallel: header.parallel ? 1 : undefined,
+			maxTools: header.maxTools,
 		};
 	});
 
-	// Hints block, same shape as the built-in path.
-	let taskPrefix = "";
-	if (input.hints && input.hints.length > 0) {
-		taskPrefix = `HINTS:\n${input.hints.map((h) => `- ${h}`).join("\n")}\n\nTASK: `;
-	}
-	const finalSteps = taskPrefix
-		? steps.map((s) => ({ ...s, task: `${taskPrefix}${s.task}` }))
-		: steps;
+	// Compose each step's task: hints + per-step tool budget (maxTools) + base
+	// task. composeStepTask handles the prefix/TASK: marker consistently.
+	const finalSteps = steps.map((s) => ({
+		...s,
+		task: composeStepTask(s.task, input.hints, s.maxTools),
+	}));
 
 	return {
 		// Recipes don't have mode/effort; use placeholder values so the Plan
