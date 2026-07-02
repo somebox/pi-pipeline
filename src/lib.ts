@@ -567,6 +567,7 @@ export interface CostStep {
 }
 
 export interface PipelineCostReport {
+	planName?: string;       // recipe name, or undefined for the generic path
 	planMode?: string;
 	planEffort?: string;
 	planStepCount?: number;
@@ -615,7 +616,7 @@ export function toRunMetrics(
 	planName?: string,
 ): RunMetrics {
 	return {
-		planName,
+		planName: planName ?? report.planName,
 		planMode: report.planMode,
 		planEffort: report.planEffort,
 		planCostShape: report.planCostShape,
@@ -1009,8 +1010,9 @@ export function buildCostStep(
 }
 
 /** Fresh cost report for a new pipeline operation, seeded with plan metadata. */
-export function newReport(plan: Plan, dryRun: boolean): PipelineCostReport {
+export function newReport(plan: Plan, dryRun: boolean, planName?: string): PipelineCostReport {
 	return {
+		planName,
 		planMode: plan.mode,
 		planEffort: plan.effort,
 		planStepCount: plan.steps.length,

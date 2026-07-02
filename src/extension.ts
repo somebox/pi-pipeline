@@ -39,9 +39,12 @@
 
 import { Type, StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import os from "node:os";
+import path from "node:path";
 import {
 	type PipelineParams,
 	type PipelineCostReport,
+	type Plan,
 	buildPlan,
 	summarizeCost,
 	renderPlan,
@@ -54,6 +57,8 @@ import {
 	renderCostReport,
 	STATIC_STATUS,
 } from "./lib.ts";
+import { buildPlanFromRecipe } from "./recipes.ts";
+import { discoverRecipes, findProjectPipelineDirs } from "./discovery.ts";
 
 /* ──────────────────────── cost state (session-scoped) ────────────────────────
  *
@@ -65,6 +70,45 @@ import {
 let currentReport: PipelineCostReport = { steps: [] };
 let dispatchCounter = 0;
 let lastReport: PipelineCostReport = { steps: [] };
+let currentPlanName: string | undefined;   // recipe name for the active run (undefined = generic path)
+
+/* ──────────────────────── plan resolution ────────────────────────
+ *
+ * Resolve a `pipeline` tool invocation to a Plan. If `pipeline` (a recipe
+ * name) is given, load it from the discovered recipes; else fall back to the
+ * generic built-in inference path (mode/effort). Returns {plan, name?, error?}.
+ */
+interface ResolvedPlan {
+	plan: Plan;
+	name?: string;       // recipe name, if a named recipe was used
+	error?: string;       // human-readable error when the plan couldn't be built
+}
+
+function resolvePlan(input: PipelineParams & { pipeline?: string; inputs?: Record<string, string> }): ResolvedPlan {
+	if (input.pipeline) {
+		const recipes = discoverRecipes({
+			userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
+			projectDirs: findProjectPipelineDirs(process.cwd()),
+		});
+		const recipe = recipes.find((r) => r.name === input.pipeline);
+		if (!recipe) {
+			return {
+				plan: buildPlan(input), // fall back to generic so the tool still returns something
+				error: `No pipeline recipe named "${input.pipeline}" was found. Available: ${recipes.map((r) => r.name).join(", ") || "(none)"}. Falling back to the generic pipeline.`,
+			};
+		}
+		return {
+				plan: buildPlanFromRecipe({
+					raw: recipe.raw,
+					nameFallback: recipe.name,
+					inputs: input.inputs,
+					hints: input.hints,
+				}),
+				name: recipe.name,
+			};
+	}
+	return { plan: buildPlan(input) }; // generic inference path
+}
 
 
 /* ──────────────────────── tool & command ──────────────────────── */
@@ -80,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setStatus("pipeline", ctx.ui.theme.fg("dim", STATIC_STATUS));
 		}
 		ctx.ui.notify(
-			"Pipeline extension loaded.\n/pipeline <task> — auto-detects mode (research vs impl) and effort (surface/standard/deep).\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-costs — breakdown of the last pipeline op by step and model.\nCost: $ util (M3), $$ research (glm-5.2), $$$ high (sonnet-5).",
+			"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-costs — breakdown of the last pipeline op by step and model.\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
 			"info",
 		);
 	});
@@ -111,7 +155,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", (event: any, _ctx: any) => {
 		if (event.toolName === "pipeline") {
 			const input = event.input ?? {};
-			currentReport = newReport(buildPlan(input as PipelineParams), input.dryRun === true);
+			const resolved = resolvePlan(input as PipelineParams & { pipeline?: string });
+			currentReport = newReport(resolved.plan, input.dryRun === true, resolved.name);
+			currentPlanName = resolved.name;
 			dispatchCounter = 0;
 			return;
 		}
@@ -158,11 +204,21 @@ export default function (pi: ExtensionAPI) {
 		name: "pipeline",
 		label: "Pipeline",
 		description:
-			"Build an effort-scaled multi-agent plan and return it as a numbered sequence of subagent calls. Two modes: 'research' (read-only/extraction, no high-tier calls in surface/standard, parent writes the spec) and 'implementation' (code changes, high plans and accepts). Three effort levels each: 'surface' (1–2 calls), 'standard' (3–5 calls), 'deep' (5–8 calls, includes parallel drafts and a kick-back loop in impl mode). The plan shows the cost class of each step ($ util / $$ research / $$$ high) so the user can see what they're about to spend. Use dryRun: true to print the plan without dispatching any subagents.",
+			"Build an effort-scaled multi-agent plan and return it as a numbered sequence of subagent calls. Two ways to pick a pipeline: (1) pass `pipeline` with a recipe name to run a specific opinionated process (e.g. 'code-quality', 'verify-source'); (2) omit it to infer a generic pipeline from the task (mode: research/implementation, effort: surface/standard/deep). Recipes are user/project/package-defined markdown files; call with { action: 'list' } is NOT supported — use the /pipelines command to browse them. The plan shows each step's agent (dev/util/research/high) so the user can see what will run. Use dryRun: true to print the plan without dispatching any subagents.",
 		parameters: Type.Object({
+			pipeline: Type.Optional(
+				Type.String({
+					description: "Name of a pipeline recipe to run (e.g. 'code-quality', 'verify-source'). Omit to infer a generic pipeline from the task.",
+				}),
+			),
 			task: Type.String({
-				description: "The task to perform, in plain language.",
+				description: "The task to perform, in plain language. For a named recipe, this provides the specifics the recipe's {{placeholders}} fill.",
 			}),
+			inputs: Type.Optional(
+				Type.Record(Type.String(), Type.String(), {
+					description: "Named inputs for a recipe's {{placeholders}} (e.g. { scope: 'frontend code' }). Optional — placeholders can also be inferred from the task.",
+				}),
+			),
 			effort: Type.Optional(
 				StringEnum(["surface", "standard", "deep"] as const, {
 					description:
@@ -190,9 +246,10 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params) {
-			const p = params as PipelineParams;
-			const plan = buildPlan(p);
-			const text = renderPlan(plan, p.task, p.dryRun ?? false);
+			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string> };
+			const resolved = resolvePlan(p);
+			const plan = resolved.plan;
+			const text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, p.task, p.dryRun ?? false);
 			return {
 				content: [
 					{
@@ -201,6 +258,7 @@ export default function (pi: ExtensionAPI) {
 					},
 				],
 				details: {
+					pipeline: resolved.name,
 					mode: plan.mode,
 					effort: plan.effort,
 					stepCount: plan.steps.length,
@@ -221,16 +279,14 @@ export default function (pi: ExtensionAPI) {
 	// 3. Slash command for explicit user invocation.
 	pi.registerCommand("pipeline", {
 		description:
-			"Run the pipeline tool. Usage: /pipeline [mode] [effort] [dryrun] <task>. Modes: research, implementation. Efforts: surface, standard, deep.",
+			"Run a pipeline. Usage: /pipeline <recipe-name> <task>  |  /pipeline [mode] [effort] [dryrun] <task>. Browse recipes with /pipelines.",
 		getArgumentCompletions: (prefix) => {
-			const candidates = [
-				"research",
-				"implementation",
-				"surface",
-				"standard",
-				"deep",
-				"dryrun",
-			];
+			const fixed = ["research", "implementation", "surface", "standard", "deep", "dryrun"];
+			const recipes = discoverRecipes({
+				userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
+				projectDirs: findProjectPipelineDirs(process.cwd()),
+			}).map((r) => r.name);
+			const candidates = [...recipes, ...fixed];
 			const matches = candidates.filter((c) => c.startsWith(prefix));
 			return matches.length > 0
 				? matches.map((c) => ({ value: c, label: c }))
@@ -240,12 +296,27 @@ export default function (pi: ExtensionAPI) {
 			const trimmed = args.trim();
 			if (!trimmed) {
 				ctx.ui.notify(
-					"Usage:\n  /pipeline <task>\n  /pipeline [mode] [effort] [dryrun] <task>\nModes: research | implementation. Efforts: surface | standard | deep.",
+					"Usage:\n  /pipeline <recipe-name> <task>\n  /pipeline <task>  (generic, infers mode+effort)\n  /pipeline [mode] [effort] [dryrun] <task>\nBrowse: /pipelines",
 					"warn",
 				);
 				return;
 			}
-			// Prepend a directive so the LLM picks up the pipeline tool.
+			// If the first token is a known recipe name, peel it off and tell the
+			// LLM to run that specific recipe with the rest as the task.
+			const recipes = discoverRecipes({
+				userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
+				projectDirs: findProjectPipelineDirs(process.cwd()),
+			});
+			const firstTok = trimmed.split(/\s+/, 1)[0]!;
+			const rest = trimmed.slice(firstTok.length).trim();
+			const recipe = recipes.find((r) => r.name === firstTok);
+			if (recipe) {
+				await pi.sendUserMessage(
+					`Use the pipeline tool with pipeline="${recipe.name}" for this task, then execute the returned plan with subagent calls. Do not stop at planning — run the steps. Report the cost shape from the plan when you summarize the result.\n\nTask: ${rest || "(use the recipe defaults)"}`,
+				);
+				return;
+			}
+			// Generic path: forward the whole string as the task.
 			await pi.sendUserMessage(
 				`Use the pipeline tool for this task, then execute the returned plan with subagent calls. Do not stop at planning — run the steps. Report the cost shape from the plan when you summarize the result.\n\nTask: ${trimmed}`,
 			);
@@ -264,6 +335,43 @@ export default function (pi: ExtensionAPI) {
 			const { title, lines } = renderCostReport(report);
 			if (ctx?.ui?.select) {
 				await ctx.ui.select(title, lines);
+			} else if (ctx?.ui?.notify) {
+				ctx.ui.notify(lines.join("\n"), "info");
+			}
+		},
+	});
+
+	// 5. `/pipelines` — list available pipelines (interim text command until
+	// the list TUI ships in Phase 3). Lists recipes (user/project/package) plus
+	// the built-in generic path.
+	pi.registerCommand("pipelines", {
+		description:
+			"List available pipeline recipes and built-in pipelines.",
+		handler: async (_args, ctx) => {
+			const recipes = discoverRecipes({
+				userDir: path.join(os.homedir(), ".pi", "agent", "pipelines"),
+				projectDirs: findProjectPipelineDirs(process.cwd()),
+			});
+			const lines: string[] = [];
+			if (recipes.length > 0) {
+				lines.push("── Recipes ──");
+				for (const r of recipes) {
+					const plan = buildPlanFromRecipe({ raw: r.raw, nameFallback: r.name });
+					const shape = summarizeCost(plan);
+					const src = r.source === "user" ? "~" : r.source === "project" ? "." : "pkg";
+					lines.push(`${r.name} [${src}] — ${plan.steps.length} steps · ${shape}${r.description ? ` · ${r.description}` : ""}`);
+				}
+			} else {
+				lines.push("── Recipes ──");
+				lines.push("(none yet. Add one to ~/.pi/agent/pipelines/ or .pi/pipelines/)");
+			}
+			lines.push("");
+			lines.push("── Built-in ──");
+			lines.push("generic [impl/research × surface/standard/deep] — infer mode+effort from the task (the /pipeline <task> path)");
+			lines.push("");
+			lines.push("Run a pipeline with: /pipeline <name> <task>  or  /pipeline <task>");
+			if (ctx?.ui?.select) {
+				await ctx.ui.select("Pipelines", lines);
 			} else if (ctx?.ui?.notify) {
 				ctx.ui.notify(lines.join("\n"), "info");
 			}
