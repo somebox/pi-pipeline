@@ -46,6 +46,8 @@ export interface PlanStep {
 	reads?: string[];
 	parallel?: number;
 	maxTools?: number;    // optional tool-call budget for this step (soft enforcement via task prompt)
+	iterate?: string;     // name of a prior step's json unit list
+	tools?: string[];     // optional per-step tool overrides
 }
 
 export interface Plan {

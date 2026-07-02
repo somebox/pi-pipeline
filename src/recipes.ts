@@ -94,10 +94,12 @@ export interface ParsedStepHeader {
 	reads: string[];
 	output: string | undefined;
 	maxTools: number | undefined;
+	iterate: string | undefined;
+	tools: string[] | undefined;
 }
 
 /** Parse a `(agent, flags)` header tail. Returns null if no parenthesized tail. */
-export function parseStepHeaderTail(tail: string): { agent: string; parallel: boolean; reads: string[]; output: string | undefined; maxTools: number | undefined } | null {
+export function parseStepHeaderTail(tail: string): { agent: string; parallel: boolean; reads: string[]; output: string | undefined; maxTools: number | undefined; iterate: string | undefined; tools: string[] | undefined } | null {
 	const m = tail.match(/^\(([^)]*)\)\s*$/);
 	if (!m) return null;
 	const parts = m[1]!.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
@@ -107,17 +109,21 @@ export function parseStepHeaderTail(tail: string): { agent: string; parallel: bo
 	let reads: string[] = [];
 	let output: string | undefined;
 	let maxTools: number | undefined;
+	let iterate: string | undefined;
+	let tools: string[] | undefined;
 	for (let i = 1; i < parts.length; i++) {
 		const p = parts[i]!;
 		if (p === "parallel") parallel = true;
 		else if (p.startsWith("reads=")) reads = p.slice(6).split(",").map((s) => s.trim()).filter(Boolean);
 		else if (p.startsWith("output=")) output = p.slice(7).trim();
+		else if (p.startsWith("iterate=")) iterate = p.slice(8).trim();
+		else if (p.startsWith("tools=")) tools = p.slice(6).split(",").map((s) => s.trim()).filter(Boolean);
 		else if (p.startsWith("maxTools=")) {
 			const n = Number.parseInt(p.slice(9), 10);
 			if (Number.isFinite(n) && n > 0) maxTools = n;
 		}
 	}
-	return { agent, parallel, reads, output, maxTools };
+	return { agent, parallel, reads, output, maxTools, iterate, tools };
 }
 
 /* ───────────────────────── prose inference ───────────────────────── */
@@ -181,6 +187,8 @@ export function parseSteps(body: string): Array<{ header: ParsedStepHeader; task
 			reads: parsed?.reads ?? [],
 			output: parsed?.output,
 			maxTools: parsed?.maxTools,
+			iterate: parsed?.iterate,
+			tools: parsed?.tools,
 		};
 		// Collect body paragraphs until the next `## ` step.
 		i++;
@@ -214,6 +222,12 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 		// subtract the output (the file this step writes is not a read).
 		let reads = header.reads.length > 0 ? header.reads : inferReads(resolvedTask);
 		if (output) reads = reads.filter((r) => r !== output);
+
+		// Infer iterate from prose: "For each `{unit}` in scope-files..."
+		const iterateMatch = resolvedTask.match(/for each `{unit(?:\.[A-Za-z0-9_-]+)?}` in ([A-Za-z0-9_-]+)/i);
+		const inferredIterate = iterateMatch ? iterateMatch[1] : undefined;
+		const iterate = header.iterate ?? inferredIterate;
+
 		return {
 			phase: header.phase,
 			agent: header.agent,
@@ -223,6 +237,8 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 			reads: reads.length > 0 ? reads : undefined,
 			parallel: header.parallel ? 1 : undefined,
 			maxTools: header.maxTools,
+			iterate,
+			tools: header.tools,
 		};
 	});
 

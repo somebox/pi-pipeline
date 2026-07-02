@@ -49,18 +49,18 @@ body`);
 /* ───────────────────────── step header tail ───────────────────────── */
 
 test("parseStepHeaderTail: agent only", () => {
-	assert.deepEqual(parseStepHeaderTail("(util)"), { agent: "util", parallel: false, reads: [], output: undefined, maxTools: undefined });
+	assert.deepEqual(parseStepHeaderTail("(util)"), { agent: "util", parallel: false, reads: [], output: undefined, maxTools: undefined, iterate: undefined, tools: undefined });
 });
 
 test("parseStepHeaderTail: agent + parallel + flags", () => {
 	assert.deepEqual(parseStepHeaderTail("(dev, parallel, reads=a.md,b.md, output=c.md)"), {
-		agent: "dev", parallel: true, reads: ["a.md", "b.md"], output: "c.md", maxTools: undefined,
+		agent: "dev", parallel: true, reads: ["a.md", "b.md"], output: "c.md", maxTools: undefined, iterate: undefined, tools: undefined,
 	});
 });
 
 test("parseStepHeaderTail: custom agent name", () => {
 	assert.deepEqual(parseStepHeaderTail("(my-custom-agent)"), {
-		agent: "my-custom-agent", parallel: false, reads: [], output: undefined, maxTools: undefined,
+		agent: "my-custom-agent", parallel: false, reads: [], output: undefined, maxTools: undefined, iterate: undefined, tools: undefined,
 	});
 });
 
@@ -226,10 +226,10 @@ test("buildPlanFromRecipe: missing input left as {{name}}", () => {
 
 test("parseStepHeaderTail: parses maxTools=N", () => {
 	assert.deepEqual(parseStepHeaderTail("(util, maxTools=5)"), {
-		agent: "util", parallel: false, reads: [], output: undefined, maxTools: 5,
+		agent: "util", parallel: false, reads: [], output: undefined, maxTools: 5, iterate: undefined, tools: undefined,
 	});
 	assert.deepEqual(parseStepHeaderTail("(util, parallel, reads=a.md, maxTools=10, output=b.md)"), {
-		agent: "util", parallel: true, reads: ["a.md"], output: "b.md", maxTools: 10,
+		agent: "util", parallel: true, reads: ["a.md"], output: "b.md", maxTools: 10, iterate: undefined, tools: undefined,
 	});
 });
 
@@ -274,3 +274,30 @@ test("buildPlanFromRecipe: budget composes with hints (hints then budget)", () =
 	assert.match(t, /^HINTS:\n- no new deps\n\n/);
 	assert.match(t, /TOOL BUDGET:.*at most 4 tool calls/);
 });
+
+/* ───────────────────────── iterate + tools (Phase 2) ───────────────────────── */
+
+test("parseStepHeaderTail: parses iterate=name and tools=a,b", () => {
+	assert.deepEqual(parseStepHeaderTail("(dev, iterate=scope-files, tools=read,write)"), {
+		agent: "dev", parallel: false, reads: [], output: undefined, maxTools: undefined,
+		iterate: "scope-files", tools: ["read", "write"],
+	});
+});
+
+test("buildPlanFromRecipe: iterate and tools flow through to PlanStep", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (dev, iterate=scope-files, tools=read,write)\nread files and write out.md",
+		nameFallback: "x",
+	});
+	assert.equal(plan.steps[0].iterate, "scope-files");
+	assert.deepEqual(plan.steps[0].tools, ["read", "write"]);
+});
+
+test("buildPlanFromRecipe: infers iterate from prose", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (dev)\nFor each `{unit}` in scope-files, read `{unit.path}` and summarize.",
+		nameFallback: "x",
+	});
+	assert.equal(plan.steps[0].iterate, "scope-files");
+});
+
