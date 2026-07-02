@@ -59,6 +59,7 @@ import {
 	renderAuditReport,
 	renderStepAudit,
 	copyToClipboard,
+	fmtTokens,
 	STATIC_STATUS,
 } from "./lib.ts";
 import { buildPlanFromRecipe } from "./recipes.ts";
@@ -96,6 +97,7 @@ let currentReport: PipelineCostReport = { steps: [] };
 let dispatchCounter = 0;
 let lastReport: PipelineCostReport = { steps: [] };
 let currentPlanName: string | undefined;   // recipe name for the active run (undefined = generic path)
+let activeProgressCache: Record<string, string> = {}; // track state transitions of running parallel slots to fire notifications
 
 /* ──────────────────────── plan resolution ────────────────────────
  *
@@ -200,11 +202,30 @@ export default function (pi: ExtensionAPI) {
 		if (!Array.isArray(progress)) return;
 		const line = renderProgressStatus(progress);
 		if (ctx?.ui?.setStatus) ctx.ui.setStatus("pipeline", line);
+
+		// Non-blocking popup notifications on status transitions (running/completed/failed)
+		for (const p of progress) {
+			if (!p) continue;
+			const key = `${p.agent}_${p.index}`;
+			const prevStatus = activeProgressCache[key];
+			const currentStatus = p.status ?? "running";
+			if (prevStatus !== currentStatus) {
+				activeProgressCache[key] = currentStatus;
+				if (currentStatus === "completed" || currentStatus === "failed") {
+					const marker = currentStatus === "completed" ? "✓" : "✗";
+					const detail = `Slot #${p.index + 1} (${p.agent}) ${currentStatus} ${marker} (${fmtTokens(p.tokens)} tokens, ${p.toolCount} tools)`;
+					if (ctx?.ui?.notify) ctx.ui.notify(`[pipeline] ${detail}`, currentStatus === "completed" ? "info" : "error");
+				} else if (currentStatus === "running") {
+					if (ctx?.ui?.notify) ctx.ui.notify(`[pipeline] Slot #${p.index + 1} (${p.agent}) started running...`, "info");
+				}
+			}
+		}
 	});
 
 	// 1e. Restore the static status line when a subagent dispatch finishes.
 	pi.on("tool_execution_end", (event: any, ctx: any) => {
 		if (event.toolName !== "subagent") return;
+		activeProgressCache = {}; // Flush cache for next step
 		if (ctx?.ui?.setStatus) ctx.ui.setStatus("pipeline", STATIC_STATUS);
 	});
 
