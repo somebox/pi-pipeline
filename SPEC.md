@@ -43,14 +43,21 @@ accumulated 188k tokens, then 400'd on a model-limit mismatch — see
    task string provides the specifics. (The unnamed generic path still
    infers mode/effort for "I don't have a specific recipe" cases.)
 5. **Context isolation by construction.** Per-unit subagents get one unit +
-   a slim shared onboarding + the coordinator's prompt — and a bounded tool
-   set (`tools: read, write`) so they *can't* explore. Small context is
-   enforced, not requested. (See **Execution model** and **Why iteration**.)
-6. **The coordinator authors the per-unit prompt.** The parent LLM doesn't
-   write per-unit tasks (it paraphrases and drops instructions — observed in
-   the first `code-quality` run). A `coordinator` agent produces the iterable
-   + a prompt *template* as its deliverable; the orchestrator substitutes
-   `{{unit}}` and dispatches. The template is the contract.
+   a slim shared onboarding + the prompt — and a **bounded tool set** so
+   they *can't* explore. "Bounded" means the agent's normal tools *minus
+   exploration tools* (`ls`, `find`, `grep`) — not a fixed `{read, write}`
+   allowlist — so it composes with whatever a custom agent brings. This is a
+   general per-step `tools=` override, not an iteration-only default: any
+   step benefits from a minimal tool set (e.g. `code-quality` step 8
+   "Present" needs only `read`). Small context is enforced, not requested.
+6. **Coordinator is opt-in, split into two concerns.** Enumeration is often
+   mechanical (a glob — no agent call); authoring a good per-unit prompt is
+   judgment (a `coordinator` agent). The parent LLM doesn't write per-unit
+   tasks (it paraphrases and drops instructions — observed in the first
+   `code-quality` run). When judgment is needed, a `coordinator` writes a
+   prompt *template* as its deliverable; the orchestrator substitutes `{unit}`
+   and dispatches. The template is the contract. (See **Enumeration is two
+   concerns**.)
 7. **Preview before you spend.** A rich overview TUI gates every run: the
    resolved plan, the agent→model mapping, the estimated cost. Confirm, edit
    inputs, or cancel.
@@ -69,6 +76,16 @@ accumulated 188k tokens, then 400'd on a model-limit mismatch — see
 - **No replacement of TS built-ins that need logic.** Recipes and TS
   pipelines coexist; the generic inference path and `implementation/deep`
   stay TS.
+- **Task-string phrasing does not retroactively add iteration.** The
+  recipe's structure is authoritative. Typing `/pipeline code-quality audit
+  every file in src/` does not turn a non-iterating recipe into an iterating
+  one — the recipe's steps run as written. Iteration is declared in the
+  recipe, not inferred from the user's phrasing. (Documented so it's a
+  decision, not a silent gap someone reports as a bug.)
+- **`maxTools` is deprecated.** Phase 1.5's soft tool-call budget proved
+  unreliable (the parent rewrites the task and drops it). It's superseded by
+  the bounded-`tools=` mechanism. Kept in code for one release as a no-op
+  hint; removed in Phase 2. New recipes should not use it.
 
 ## Why iteration (the motivation)
 
@@ -96,21 +113,20 @@ The audit then shows N dispatches of ~5k tokens each, not one dispatch of
 
 Every iteration step has three phases:
 
-1. **Enumerate** — a `coordinator` agent (or a mechanical glob/listing for
-   trivial cases) produces a *structured list of units* as JSON. Units can
-   be files, screenshots, ideas, bug reports, a range of N — anything
-   iterable. The deliverable is `units.json`, not prose.
+1. **Enumerate** — produce a *structured list of units* as JSON. For trivial
+   cases (a glob, a directory listing) this is **mechanical** — no agent
+   call. For judgment cases ("generate 8 ideas", "match screenshots to
+   cards") an agent produces the list. The deliverable is `<name>.json`, not
+   prose. (See **Enumeration is two concerns** below.)
 2. **Map** — the orchestrator spawns **one bounded subagent per unit**. Each
    subagent receives: the unit itself, a slim shared onboarding (prepared
    once: the card list, the repo standards, etc.), and the **per-unit prompt
-   template the coordinator authored**. The orchestrator substitutes
-   `{{unit}}` (and any `{{unit.*}}` fields) into the template and dispatches.
-   The subagent has `tools: read, write` (plus `bash` only if the step
-   needs it) — it cannot explore beyond the unit. Each map step is a set of
-   N small, isolated dispatches.
+   template**. The orchestrator substitutes `{unit}` (and any `{unit.*}`
+   fields) into the template and dispatches. The subagent has a bounded tool
+   set — it cannot explore beyond the unit. Each map step is a set of N
+   small, isolated dispatches.
 3. **Reduce** — a later step reads the per-unit outputs (`summary-*.md`,
-   `findings-*.md`) and synthesizes. The reduce agent has `read` access to
-   the per-unit outputs but still no `ls`/`find` — it reads exactly what the
+   `findings-*.md`) and synthesizes. The reduce agent reads exactly what the
    map step wrote, nothing more.
 
 **Per-unit chaining.** A unit's map subagent can itself be multi-step
@@ -119,28 +135,65 @@ with its own tool budget, not a nested pipeline. The point is that the
 subagent works on *one unit end-to-end* with only that unit in context.
 
 **The iterable is content, not code.** "N ideas" or "2-3 variations" are
-prompt-template content the coordinator parameterizes; the orchestrator just
-runs the map over whatever list step 1 produced. This is what makes a
-pipeline work for ideation (generate N → research each → sketch 2-3 →
-review all → iterate) as naturally as for files (summarize each file → merge).
+prompt-template content; the orchestrator just runs the map over whatever
+list the enumerate step produced. This is what makes a pipeline work for
+ideation (generate N → research each → sketch 2-3 → review all → iterate)
+as naturally as for files (summarize each file → merge).
+
+## Implementation strategy: compile, don't build
+
+**pi-subagents already has most of the enumerate→map mechanism.** Its
+`chain` mode supports a dynamic-fanout step:
+
+```
+{ expand: { from: { output, path }, item, key, maxItems, onEmpty },
+  parallel: { agent, task: "template with {item}, {item.path}, ...", ... },
+  collect: { as } }
+```
+
+This reads a prior step's structured JSON output at a JSON Pointer path,
+materializes N parallel subagent tasks with template substitution
+(`{item}` / `{item.path}` / `{task}` / `{previous}` / `{chain_dir}` /
+`{outputs.name}`), and supports per-task overrides (`model`, `reads`,
+`output`, and a runtime `tools` allowlist). This is *nearly exactly* the
+enumerate→map model — which is why the per-unit placeholder syntax below
+uses single braces (`{unit.path}`) to match pi-subagents' `{item.path}`
+convention, minimizing the translation cost.
+
+**Implication:** Phase 2 is framed as a **recipe → chain compiler**, not a
+new dispatcher. We translate an `iterate=` step into a pi-subagents chain
+with an `expand` step and reuse their fanout/collect/concurrency machinery
+(concurrency caps, structured-output validation, per-task overrides come for
+free). A half-day spike confirms the `tools` per-task override is usable
+end-to-end before we commit; if it isn't, we fall back to bounded *agents*
+(`dev-bounded.md`) rather than per-step `tools=`. Either way we write far
+less orchestration code than a from-scratch dispatcher.
 
 ## Iteration steps (recipe syntax)
 
-A step iterates when it declares an iterable:
+A step iterates when it declares an iterable, either explicitly via
+`iterate=<name>` or inferred from "For each `{unit}` in..." prose:
 
 ```markdown
-## 2. Summarize each file  (dev, iterate=scope-files, output=summary-{{unit}}.md)
-Read `{{unit}}` and write a 100-word summary. Do not read any other file.
+## 2. Summarize each file  (dev, iterate=scope-files, output=summary-{unit}.md)
+For each file in the scope list, read `{unit}` and write a 100-word summary.
+Do not read any other file.
 ```
 
-- `iterate=<name>` — the iterable is the unit list a prior step produced
-  (here `scope-files`, written by step 1 as `units.json`).
-- `{{unit}}` — the per-unit placeholder the orchestrator substitutes. May
-  be a string path, or an object with fields (`{{unit.path}}`, `{{unit.mtime}}`).
-- `output=summary-{{unit}}.md` — one output per unit; a later reduce step
-  reads `summary-*.md`.
-- The step's agent runs **bounded** (`tools: read, write` by default for
-  iterate steps; `bash` only if the step declares it needs it).
+- `iterate=<name>` — binds to the unit list a prior step wrote to
+  `<name>.json` (here step 1 wrote `scope-files.json`). The `<name>` is the
+  contract; `iterate=scope-files` reads `scope-files.json`, never a bare
+  `units.json`. This lets a recipe have two iteration phases alive at once
+  (e.g. `ideas` then `finalists`) without filename collisions.
+- `{unit}` / `{unit.path}` / `{unit.mtime}` — the per-unit placeholder,
+  substituted at **dispatch time** (one substitution per unit). Single braces
+  distinguish it from `{{input}}` placeholders (substituted once at
+  plan-build time) and match pi-subagents' own `{item.x}` convention.
+- `output=summary-{unit}.md` — one output per unit; a later reduce step reads
+  `summary-*.md`.
+- Inference: "For each `{unit}` in <list>..." in the prose implies
+  `iterate=<list>` with no header flag. The flag is an override for when
+  inference is ambiguous.
 
 A reduce step is an ordinary step that reads the per-unit outputs:
 
@@ -150,20 +203,33 @@ Read every `summary-*.md`. Cross-check for patterns. Write `summaries.md`.
 ```
 
 `parallel` (the v0 fan-out flag) is subsumed by `iterate=`. A step with
-`parallel` but no `iterate=` remains supported as a hint ("fan out, parent
-picks N") but is soft; `iterate=` is the enforceable form.
+`parallel` but no `iterate=` remains supported as a legacy hint ("fan out,
+parent picks N") but is soft; `iterate=` is the enforceable form. New
+recipes should use `iterate=`.
 
-## The coordinator profile
+## Enumeration is two concerns (split the coordinator)
 
-A new agent, `coordinator`, whose job is to **produce the iterable and the
-per-unit prompt template** — not to do the work. It is a high-tier agent
-(sonnet-5-class) because writing a good per-unit prompt is judgment work.
+The original "coordinator" bundled two unrelated jobs: (a) producing the
+iterable and (b) authoring a good per-unit prompt. They have different
+shapes — (a) is often mechanical (a glob), (b) is always judgment. Split
+them:
 
-- Deliverable 1: `units.json` — the enumerated list (paths, or objects with
-  fields the template will reference).
-- Deliverable 2: `per-unit-prompt.md` — the template, with `{{unit}}` /
-  `{{unit.*}}` placeholders, that the orchestrator will substitute per unit.
-- The coordinator does **not** run per-unit work. It sets up the map.
+- **`enumerate`** — mechanical, no agent call for trivial cases. A
+  `iterate=glob:*.go` shorthand globs directly and writes `glob.json`. For
+  judgment enumeration ("generate 8 ideas", "match screenshots to cards"),
+  any agent (typically `high`) writes `<name>.json` as a normal step output.
+- **`plan-prompt`** — optional, uses the `coordinator` agent, and *only*
+  writes `per-unit-prompt.md` given the units. Reach for it when the
+  per-unit prompt genuinely needs judgment (screenshot→card matching); skip
+  it when the step's own prose is already a good per-unit prompt (most file
+  iterations).
+
+The `coordinator` profile is therefore **opt-in**, not mandatory. A simple
+`summarize-files` recipe uses mechanical enumeration + the step's own prose
+as the prompt — zero coordinator calls. A `screenshot-worklog` recipe uses
+a judgment enumerate step (which also writes `per-unit-prompt.md` since the
+matching logic is complex). This removes a forced LLM call from the common
+case and lets the two concerns evolve independently.
 
 This separation is the enforcement backbone: the parent LLM calls
 `subagent({agent, task: renderedPrompt})` — it doesn't author the task, so
@@ -172,7 +238,7 @@ the contract; the orchestrator is mechanical.
 
 ## Profiles
 
-A **profile** is a named agent. The package ships four:
+A **profile** is a named agent. The package ships five:
 
 | Profile | Description (from the agent's frontmatter) |
 |---|---|
@@ -180,13 +246,17 @@ A **profile** is a named agent. The package ships four:
 | `util` | Mechanical work: finding files, summarizing, running tests. |
 | `research` | Review, debugging, documentation, consolidation. |
 | `high` | High-level model for software architecture, planning, judgment. |
+| `coordinator` | Authors the per-unit prompt template for complex iteration (opt-in; see **Enumeration is two concerns**). |
 
 - Each profile is an `.md` file in `agents/` (e.g. `agents/dev.md`) with a
   `description:` in frontmatter. Adding a profile = adding an agent file.
 - The user binds profiles to models via `subagents.agentOverrides` in
   `~/.pi/agent/settings.json` (existing mechanism — no new config concept).
+  To reduce first-run friction, the package ships sane zero-config model
+  defaults per profile; the overview TUI's "Edit profiles" is the first-run
+  setup wizard (pick models for any unbound profiles before the first run).
 - Recipes reference agents by name. Any agent (built-in or custom) can be
-  referenced; the TUI validates that referenced agents are configured.
+  referenced; the overview TUI validates that referenced agents are configured.
 - **Cost classes (`$`/`$$`/`$$$`) are dropped.** The plan shows agent names
   and real resolved models, not abstract cost symbols. The cost shape line
   becomes `1 util + 2 dev + 3 research + 1 high` — more honest. Real costs
@@ -237,24 +307,38 @@ A `# <name>` H1 (title, ignored) followed by numbered
 **Step header grammar:**
 
 ```
-## <number>. <phase>  ( <agent> [, parallel] [, reads=<files>] [, output=<file>] )
+## <number>. <phase>  ( <agent> [, reads=<files>] [, output=<file>] [, iterate=<name>] [, tools=<list>] )
 ```
 
-- `<agent>` — `dev` | `util` | `research` | `high` | any custom agent name
-- `parallel` — marks a fan-out slot (see Fan-out)
-- `reads=<a.md,b.md>` — optional explicit reads
-- `output=<file>` — optional explicit output filename
+- `<agent>` — `dev` | `util` | `research` | `high` | `coordinator` | any custom agent name
+- `reads=<a.md,b.md>` — optional explicit reads (else inferred from prose)
+- `output=<file>` — optional explicit output filename (else inferred). May
+  contain `{unit}` for iterate steps.
+- `iterate=<name>` — bind to a prior step's `<name>.json` unit list (see
+  **Iteration steps**). Also inferrable from "For each `{unit}` in <name>..." prose.
+- `tools=<list>` — optional tool allowlist/override for this step (e.g.
+  `tools=read,write`). Default: the agent's normal tools **minus exploration
+  tools** (`ls`, `find`, `grep`) — see principle #5. `bash` is opt-in.
+- `parallel` (legacy) — soft fan-out hint; superseded by `iterate=`.
+- `maxTools` (deprecated) — see Non-goals.
 
 The section's body paragraphs are the task text, verbatim.
 
-**Placeholders:** `{{name}}` in any text is substituted at plan-build time
-from the invocation's inputs. Missing inputs are surfaced by the overview
-TUI (prompt or report).
+**Placeholders — two syntaxes, two timings:**
+- `{{name}}` — **input** placeholder, substituted once at plan-build time
+  from the invocation's `inputs`. Double braces.
+- `{unit}` / `{unit.field}` — **per-unit** placeholder, substituted once per
+  dispatch in an iterate step. Single braces (matches pi-subagents' `{item.x}`
+  convention, minimizing compile-translation cost). Missing inputs are
+  surfaced by the overview TUI; a missing `{unit.field}` (e.g. the step
+  references `{unit.mtime}` but the enumerate step's objects have no `mtime`)
+  is a **validation error at load time**, not a silent no-op.
 
 **Inputs/reads/output inference:** `output` and `reads` are inferred from
 prose patterns ("Write `findings.md`" → output; "Read `standards.md`" →
-reads) with a simple regex, overridable by explicit flags. (Decision: Q5 =
-infer with pattern.) This is the one bit of magic; flags always win.
+reads) with a simple regex, overridable by explicit flags. `iterate=` is
+inferrable from "For each `{unit}` in <name>...". (Decision: Q5 = infer with
+pattern.) Flags always win. The common iterate step needs zero header flags.
 
 ### What the loader produces
 
@@ -263,7 +347,11 @@ replacing `tier`/`costClass`):
 
 ```ts
 PlanStep {
-  phase, agent, label, task, output?, reads?, parallel?
+  phase, agent, label, task,
+  output?, reads?,
+  iterate?,        // name of a prior step's <name>.json unit list
+  tools?,          // optional per-step tool allowlist/override
+  parallel?,       // legacy soft fan-out hint
 }
 Plan {
   name, description, summary, steps[]
@@ -306,13 +394,24 @@ package). Select one to:
 
 ### 2. Overview view (pre-run gate)
 
-Before any dispatch, a rich confirmation:
+Before any dispatch, a rich confirmation. **One principle: surface every
+automated decision before the first dispatch and let the user veto it** —
+recipe selection, per-unit prompt, agent mapping, and structural validation
+are all instances of this, not separate features.
 - The resolved plan: each step with its agent, task snippet, reads/writes
 - The agent→model mapping for every agent this recipe uses (`dev → kimi-k2.7`,
   `high → sonnet-5`, …), with each agent's one-sentence description
 - Inputs filled in (or prompted if missing)
 - Estimated cost shape (agent counts; real cost once models are known)
-- Validation: any referenced agent that isn't configured is flagged here
+- **Structural validation** (fail at preview, not mid-run):
+  - any referenced agent that isn't configured
+  - any `iterate=<name>` whose `<name>.json` has no producing step
+  - any `{unit.field}` referenced in an iterate step that the producing
+    step's unit schema doesn't declare (e.g. `{unit.mtime}` but objects have
+    no `mtime` field)
+- **Coordinator trust:** if the recipe uses a `coordinator` to author a
+  `per-unit-prompt.md`, show that prompt here before dispatching — a bad
+  coordinator = bad whole run.
 - Actions: **Confirm** / **Edit inputs** / **Edit profiles** / **Cancel**
 
 On Confirm, the tool returns the plan to the LLM, which executes it with
@@ -335,6 +434,12 @@ Live status + cost, replacing `/pipeline-costs`:
 - Cumulative cost by model (from the cost tracking we already have), updating
   live
 - When idle (no active run): shows the *last* run's summary + total cost
+- **Retry failed units:** for a partially-failed iterate step, re-read the
+  `<name>.json` unit list, filter to units whose output file
+  (`summary-{unit.path}.md`, etc.) doesn't exist, and re-dispatch only those —
+  not the whole N. Falls out naturally from the unit→output naming convention;
+  cheap to design now, expensive to retrofit after the dashboard's data model
+  is fixed. (Per-unit failure handling: proceed + flag at reduce; see open Q.)
 - Toggle in/out with `/pipeline` (or a keybinding) — the message stream keeps
   accumulating behind it
 
@@ -500,8 +605,9 @@ and the dashboard tracks the run.
 ## Worked example: `summarize-files` (iteration)
 
 The simplest iteration recipe — and the proof-of-concept for context
-isolation by construction. One bounded `dev` subagent per file; no `ls`/
-`find`/`bash`.
+isolation by construction. Mechanical enumeration (a glob, no agent call);
+the step's own prose is the per-unit prompt (no `coordinator` needed); one
+bounded `dev` per file; no `ls`/`find`/`bash`.
 
 ```markdown
 ---
@@ -512,25 +618,24 @@ inputs:
 
 # summarize-files
 
-## 1. Enumerate files  (coordinator, output=units.json)
+## 1. Enumerate files  (util, output=scope-files.json, tools=read)
 List every file matching `{{glob}}` (relative paths). Exclude `.git/`,
-`node_modules/`. Write `units.json` as an array of {"path": "..."}. Then
-write `per-unit-prompt.md`: a one-paragraph prompt telling a `dev` agent to
-read exactly one file and write a 100-word summary. The prompt must say: do
-not read any other file.
+`node_modules/`. Write `scope-files.json` as an array of {"path": "..."}.
 
-## 2. Summarize each file  (dev, iterate=units, reads=per-unit-prompt.md, output=summary-{{unit.path}}.md)
-Follow `per-unit-prompt.md` for the unit `{{unit.path}}`. Read only that
-file. Write `summary-{{unit.path}}.md`. Do not read any other file.
+## 2. Summarize each file  (dev, iterate=scope-files, output=summary-{unit.path}.md)
+For each file in the scope list, read `{unit.path}` and write a 100-word
+summary to `summary-{unit.path}.md`. Do not read any other file.
 
 ## 3. Merge summaries  (research, reads=summary-*.md, output=summaries.md)
 Read every `summary-*.md`. Cross-check for patterns. Write `summaries.md`.
 ```
 
-Step 1 produces the iterable + the per-unit prompt (the coordinator's two
-deliverables). Step 2 is the map: the orchestrator substitutes `{{unit.path}}`
-and dispatches one bounded `dev` per file. Step 3 is the reduce. Each step-2
-dispatch is ~5k tokens and isolated — bloat is impossible.
+Step 1 enumerates (mechanically — a `util` with `tools=read` just globs and
+writes JSON; could also be `iterate=glob:*.go` inline). Step 2 is the map:
+the orchestrator substitutes `{unit.path}` and dispatches one bounded `dev`
+per file, using the step's own prose as the per-unit prompt — no
+`coordinator` call, no `per-unit-prompt.md`. Step 3 is the reduce. Each
+step-2 dispatch is ~5k tokens and isolated — bloat is impossible.
 
 ## Worked example: `screenshot-worklog` (iteration over non-files)
 
@@ -548,66 +653,47 @@ inputs:
 
 # screenshot-worklog
 
-## 1. Enumerate screenshots + load board  (coordinator, output=units.json)
+## 1. Enumerate screenshots + load board  (coordinator, output=shots.json, tools=read,bash)
 List every image in `{{screenshots-dir}}` with its mtime. Load the
 engineering board at `{{board-url}}` and produce a compact card/feature
-list. Write `units.json` as [{"path": "...", "mtime": 1234567890}].
-Write `per-unit-prompt.md`: for one screenshot, find commits since its
+list. Write `shots.json` as [{"path": "...", "mtime": 1234567890}].
+Then write `per-unit-prompt.md`: for one screenshot, find commits since its
 mtime, match to a card from the shared list, review the image, attach to
 that card, rename to `<feature>-<date>.png`, move to `worklog/`.
 
-## 2. Process each screenshot  (dev, iterate=units, reads=per-unit-prompt.md, board.json, output=worklog-{{unit.path}}.md)
-Follow `per-unit-prompt.md` for `{{unit.path}}` (mtime `{{unit.mtime}}`).
+## 2. Process each screenshot  (dev, iterate=shots, reads=per-unit-prompt.md, board.json, output=worklog-{unit.path}.md, tools=read,write,bash)
+Follow `per-unit-prompt.md` for `{unit.path}` (mtime `{unit.mtime}`).
 The board list is in `board.json`. Do not read other screenshots.
 
 ## 3. Report  (research, reads=worklog-*.md, output=report.md)
 Summarize what was processed and any screenshots that couldn't be matched.
 ```
 
-Step 2 is a per-unit *chain* (commits → match → review → attach → rename →
-file) owned by one focused `dev` agent with `bash` (for git/attach/rename).
-The small-context guarantee holds because the subagent sees one screenshot
-+ the shared board list + the prompt — not the whole repo or all screenshots.
+Step 1 is the judgment case — a `coordinator` that needs `bash` (to load
+the board and `git log`) and writes both `shots.json` and
+`per-unit-prompt.md` (the matching logic is complex enough to warrant a
+authored template rather than the step's own prose). Step 2 is the per-unit
+*chain* (commits → match → review → attach → rename → file) owned by one
+focused `dev` with `tools=read,write,bash`. The small-context guarantee
+holds because the subagent sees one screenshot + the shared board list +
+the prompt — not the whole repo or all screenshots.
 
-## Worked example: `ideation` (iteration where N is content)
+## Note: iteration where N is content (not code)
 
-The user's example: generate N ideas → research each → sketch 2-3 → review
-all → iterate.
-
-```markdown
----
-name: ideation
-inputs:
-  - brief
----
-
-# ideation
-
-## 1. Generate ideas  (high, output=units.json)
-Based on `{{brief}}`, generate 8 distinct ideas. Write `units.json` as
-[{"id": "...", "summary": "...", "angle": "..."}].
-
-## 2. Research each idea  (research, iterate=units, output=research-{{unit.id}}.md)
-Gather source material for idea `{{unit.summary}}` (angle: `{{unit.angle}}`).
-Write `research-{{unit.id}}.md`. Do not research other ideas.
-
-## 3. Pick finalists  (high, reads=research-*.md, output=finalists.json)
-Read every `research-*.md`. Pick the 3 strongest. Write `finalists.json`
-as [{"id": "...", "summary": "..."}].
-
-## 4. Sketch each finalist  (dev, iterate=finalists, reads=research-{{unit.id}}.md, output=sketch-{{unit.id}}.md)
-Sketch a pitch and spec for `{{unit.summary}}`. Read its research file.
-Write `sketch-{{unit.id}}.md`.
-
-## 5. Review all proposals  (high, reads=sketch-*.md, output=review.md)
-Read every `sketch-*.md`. Recommend which to pursue and what to iterate.
-```
-
-N (8 ideas, 3 finalists) is prompt-template content — step 1's prompt says
-"generate 8"; step 3 says "pick 3." The orchestrator runs the map over
-whatever list each enumerate step produced. This is the same iterate→map→
-reduce pattern over a non-file iterable (ideas), proving the model is
-content-agnostic.
+The same enumerate→map→reduce pattern works when the iterable isn't files but
+*ideas* (or bugs, cards, proposals): an enumerate step ("generate 8 ideas
+based on `{{brief}}`") produces `<name>.json`, a map step iterates over it
+(`research-{unit.id}.md` per idea), a reduce step picks finalists
+(`finalists.json`), and a second map step iterates over *that* list
+(`sketch-{unit.id}.md`). N ("8 ideas", "3 finalists") is prompt-template
+content in the enumerate step's prose — the orchestrator runs the map over
+whatever list each enumerate step produced. This needs no new syntax beyond
+what `summarize-files` already shows; the only difference is the unit
+objects have domain fields (`id`, `summary`, `angle`) instead of `path`, and
+a recipe can have two iteration phases alive at once because each
+`iterate=<name>` reads its own `<name>.json`. (Full recipe left as an
+exercise rather than a third worked example — the mechanism is identical to
+`screenshot-worklog`; only the unit schema differs.)
 
 ## Implementation phasing
 
@@ -631,24 +717,41 @@ audit are done; the next big lever is the iteration runtime.**
 - Model-limit override docs (`~/.pi/agent/models.json`) — the actual cause
   of the original 400s.
 
-**Phase 2 — Iteration runtime (NEXT; the v1.0 identity).**
-- `coordinator` profile (`agents/coordinator.md`).
-- `iterate=<name>` step kind: parse, render, and execute via the
-  `subagent` `tasks[]` shape with one bounded dispatch per unit.
-- `{{unit}}` / `{{unit.*}}` substitution in iterate step tasks and outputs.
-- Bounded tool set for iterate steps (`tools: read, write`; `bash` opt-in).
-- `units.json` as the inter-step iterable contract.
+**Phase 2 — Iteration via compile-to-chain (NEXT; the v1.0 identity).**
+- **Spike first (half-day):** confirm pi-subagents' `chain` `expand` step
+  reads a prior structured output, fans out N tasks with `{item.x}`
+  substitution, and that the runtime `tools` per-task override works
+  end-to-end. If yes → compile target; if no → fall back to bounded *agents*
+  (`dev-bounded.md`) instead of per-step `tools=`.
+- `coordinator` profile (`agents/coordinator.md`) — opt-in, judgment only.
+- `iterate=<name>` step kind: parse + render. `{unit}` / `{unit.*}`
+  substitution (single braces, matching `{item.x}`).
+- **Compiler:** translate an iterate step to a pi-subagents chain with an
+  `expand` step, reusing their fanout/collect/concurrency. Write far less
+  orchestration code than a from-scratch dispatcher.
+- Per-step `tools=` override (general, not iteration-only): agent's tools
+  minus exploration tools (`ls`/`find`/`grep`) by default; `bash` opt-in.
+- `iterate=glob:<pattern>` shorthand for mechanical enumeration (no agent).
+- `<name>.json` as the inter-step iterable contract (not a bare `units.json`).
+- **Deprecate `maxTools`** (no-op hint for one release, then remove).
+- Structural validation at load time: `iterate=` references resolve;
+  `{unit.field}` fields exist in the producing step's schema.
 - Proof-of-concept: `summarize-files` recipe validated against a real repo —
   audit shows N small dispatches vs one bloated one.
 - Reduce steps read `summary-*.md` / `findings-*.md` (existing `reads=`
   glob already handles this).
 
-**Phase 3 — Overview TUI (preview gate).**
+**Phase 3 — Overview TUI (preview gate) + `pi pipeline new`.**
 - Rich pre-run confirmation (or `confirm`+text v1 if `ctx.ui.custom()` in a
   tool handler needs API work).
-- Agent→model mapping display + validation.
+- Agent→model mapping display + validation; first-run profile setup wizard.
 - Input prompting; generic-path check.
+- Structural validation surfaced (iterate refs, unit fields, agents).
+- Coordinator-trust: show `per-unit-prompt.md` before dispatch.
 - Metrics drive the cost estimate.
+- **`pi pipeline new`** moved here from Phase 6 — iteration recipes have
+  3-part enumerate/map/reduce structure worth scaffolding early; generate a
+  filled-in skeleton so authors edit rather than wire from scratch.
 
 **Phase 4 — List TUI.**
 - `/pipeline` opens the browse list (replaces the interim `/pipelines` text
@@ -657,9 +760,11 @@ audit are done; the next big lever is the iteration runtime.**
 **Phase 5 — Dashboard TUI (replaces `/pipeline-costs`).**
 - Live status + cost during a run, driven by `RunMetrics`.
 - Last-run summary when idle.
+- **Retry failed units** for partially-failed iterate steps (re-dispatch
+  only units whose output file is missing).
 
-**Phase 6 — Add/remove from the TUI + `pi pipeline new`.**
-- Install/remove sources; scaffolder for new recipes.
+**Phase 6 — Add/remove from the TUI.**
+- Install/remove sources (`git:`/local/`npm:`).
 
 ## Resolved open questions
 
@@ -706,23 +811,43 @@ audit are done; the next big lever is the iteration runtime.**
    call (infer mode/effort → built-in template) as a fallback, or require
    every invocation to name a recipe? Lean: keep it; it's the "I don't have
    a recipe for this" escape hatch.
-5. **Iteration: bounded tools per step** — should the bounded tool set
-   (`read`, `write`, +opt-in `bash`) be the default for *all* iterate steps,
-   or declared per-step (`tools=read,write` in the header)? Lean: default
-   bounded, opt-out via a `tools=` flag.
-6. **Iteration: who enumerates trivial iterables?** — for `iterate=files`
-   where the list is a glob, do we skip the coordinator and glob directly,
-   or always go through the coordinator (consistency)? Lean: a `iterate=glob:*.go`
-   shorthand for mechanical globs; coordinator for anything that needs
-   judgment (ideas, screenshots with mtimes, matched entities).
-7. **Iteration: per-unit failure handling** — if one of N map dispatches
-   fails, does the whole step fail, or does the reduce proceed with the
-   successful outputs and flag the gap? Lean: proceed + flag; the parent's
-   5× blind retry loop (observed) should be replaced by "fail this unit,
-   continue, report at reduce."
-8. **Iteration: per-unit concurrency** — default cap on concurrent map
-   dispatches (the `subagent` `concurrency` param)? Lean: yes, default 4;
-   overridable in the recipe.
-9. **Coordinator trust** — the coordinator authors the per-unit prompt, so a
-   bad coordinator = bad whole run. Should the overview TUI show the
-   coordinator's `per-unit-prompt.md` before dispatching? Lean: yes.
+5. **`tools=` per-step override — resolved as general, not iteration-only.**
+   Any step can declare `tools=`; default is the agent's tools minus
+   exploration tools (`ls`/`find`/`grep`), `bash` opt-in. (Was open Q5;
+   settled by review.) **Still open:** whether pi-subagents' `expand` step
+   honors a per-task `tools` override end-to-end — the runtime allowlist
+   (`RUNNER_DYNAMIC_PARALLEL_KEYS`) includes `tools` but the schema I read
+   didn't. The Phase 2 spike answers this; if it doesn't, fall back to
+   bounded *agents* (`dev-bounded.md`) rather than per-step `tools=`.
+6. **Trivial-iterable enumeration — resolved.** `iterate=glob:<pattern>`
+   globs mechanically (no agent); judgment enumeration uses an agent
+   (`high` or `coordinator`) that writes `<name>.json`. The coordinator is
+   opt-in, not mandatory. (Was open Q6; settled by review.)
+7. **Per-unit failure handling — resolved: proceed + flag + retry.** If one
+   of N map dispatches fails, the step continues; the reduce step proceeds
+   with successful outputs and flags the gap; the dashboard offers
+   "retry failed units" (re-dispatch only units whose output file is
+   missing). This replaces the parent's observed 5× blind retry loop.
+   (Was open Q7; settled by review.)
+8. **Per-unit concurrency — resolved: inherit from pi-subagents.** The
+   compile-to-chain strategy reuses pi-subagents' `concurrency` param
+   rather than building our own. Default 4; overridable in the recipe.
+   (Was open Q8; settled by the compile strategy.)
+9. **Coordinator trust — resolved: show in overview.** If a `coordinator`
+   authored `per-unit-prompt.md`, the overview TUI shows it before
+   dispatching. (Was open Q9; settled by review.)
+10. **Unit schema declaration** — should an enumerate step declare its unit
+    schema (e.g. `units: [path, mtime]` in frontmatter) so `{unit.field}`
+    references can be validated at load time? Lean: yes — this is what makes
+    the overview's structural validation (a `{unit.mtime}` typo failing at
+    preview, not mid-run) actually work. Needs the schema syntax pinned down.
+11. **Step identity for `iterate=` references** — `iterate=scope-files`
+    currently binds to a step by its `<name>.json` filename, which means
+    renaming the file breaks the reference. Should steps have an explicit
+    `id:` (defaulting to the slugified phase or step number) that `iterate=`
+    references instead? Lean: yes — decouples wiring from prose edits.
+12. **Doc structure — split the spec?** SPEC.md is now ~750 lines mixing
+    normative format, motivation, and worked examples (with `code-quality`
+    duplicated between SPEC.md and `pipelines/code-quality.md`). Lean: keep
+    SPEC.md normative; move worked examples to `EXAMPLES.md` or just point at
+    the real recipe files in `pipelines/` (single source of truth).
