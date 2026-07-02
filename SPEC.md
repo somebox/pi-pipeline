@@ -1,130 +1,88 @@
 # Pipeline Recipes — Design Spec
 
 > Status: **draft** — design doc, not yet implemented. Refine here before
-> writing the loader. The worked example throughout is `code-quality`.
+> writing the loader. Worked examples: `code-quality` and `verify-source`.
 
 ## Goal
 
-Let a user define, share, and refine a multi-step pipeline as **prose**, not
-code — and have it run through the existing `pipeline` tool surface (plan
-rendering, dry-run, live progress, `/pipeline-costs`, model pinning/fallback).
+Let a user define, share, and run a multi-step pipeline as **prose**, and
+give them a **TUI** to browse, preview, confirm, and monitor pipelines — so
+the whole loop (define → discover → preview → run → watch → share) needs no
+TypeScript and no text-dump commands.
 
-Today the only way to define a pipeline is to edit `src/lib.ts` and add a TS
-`Plan` object. That doesn't scale: every team's "how we review", "how we
-migrate", "how we write tests" is a pipeline, and users won't (and shouldn't)
-write TS for each. Recipes are the pi-native answer — markdown, the same
-format pi already uses for skills and agents.
-
-## Non-goals (for the first cut)
-
-- **No conditional logic in recipes.** A recipe is a fixed sequence of steps
-  with optional parallel fan-out. If a workflow needs real branching
-  ("if tests fail, re-run step 2"), it stays a TS built-in. The
-  `implementation/deep` kick-back loop is the canonical example and stays in
-  TS. We can revisit declarative conditionals later; spec'ing them now
-  risks a half-language.
-- **No new agent system.** Recipes name existing tier agents
-  (`util` / `research` / `high`) and any custom agent the user has
-  configured. They don't define agents.
-- **No replacement of the TS built-ins.** Recipes and TS pipelines coexist;
-  `/pipelines` lists both, the tool dispatches both through the same
-  `Plan`/`PlanStep` types.
+Today pipelines are hardcoded TS templates in `src/lib.ts`, invoked by a
+text command, with cost inspection via a separate `/pipeline-costs` command.
+This spec replaces that with: **recipes** (markdown), **profiles** (named
+agents, not cost classes), and a **TUI** (list / overview / dashboard).
 
 ## Design principles
 
-1. **Prose first.** A pipeline is a numbered checklist with tier annotations.
-   The user's example (below) is the source of truth for what the format must
-   express. If it can't express that, the format is wrong.
-2. **Same types, same runtime.** A loaded recipe produces the exact `Plan`
-   object the built-in templates already produce, so `renderPlan`,
-   `summarizeCost`, `renderProgressStatus`, `renderCostReport`, model
-   pinning, and OpenRouter fallback all work unchanged.
-3. **Inputs are explicit.** A recipe can declare placeholders the user fills
-   at invocation (`{{scope}}`, `{{diff-ref}}`). The tool surfaces missing
-   inputs and the command can prompt for them.
-4. **Discoverable.** `/pipelines` lists every available recipe (built-in +
-   user + project + package) with its description and cost shape — the same
-   affordance `pi list` gives for packages.
-5. **Sharable & versionable.** Recipes live in `pipelines/` dirs and ship in
-   packages via the `pi` manifest, exactly like skills/agents/prompts.
+1. **Prose first.** A pipeline is a numbered checklist with agent
+   annotations. The user's hand-written `code-quality` (below) is the source
+   of truth — if the format can't express that, the format is wrong.
+2. **A profile is just an agent.** No separate "cost class" concept. The
+   package ships a roster of agents (`dev`, `util`, `research`, `high`);
+   recipes name agents; the user binds each agent to a real model via the
+   existing `subagents.agentOverrides`. The agent's `description:` frontmatter
+   *is* the one-sentence profile description.
+3. **Same runtime types.** A loaded recipe produces the existing `Plan` /
+   `PlanStep` types (minus `costClass` — see Profiles), so `renderPlan`,
+   `summarizeCost`, live progress, and cost tracking work with minimal changes.
+4. **Recipes are opinionated processes.** A named recipe is a complete
+   process — it has no `mode`/`effort`. The recipe provides the shape; the
+   task string provides the specifics. (The unnamed generic path still
+   infers mode/effort for "I don't have a specific recipe" cases.)
+5. **Preview before you spend.** A rich overview TUI gates every run: the
+   resolved plan, the agent→model mapping, the estimated cost. Confirm, edit
+   inputs, or cancel.
+6. **Watch it run.** A dashboard TUI shows live status and cost during a run,
+   replacing `/pipeline-costs`.
 
-## The worked example: `code-quality`
+## Non-goals (for the first cut)
 
-This is the pipeline the user wrote by hand. It's the spec's north star —
-every field in the format exists to let this be written *as-is* and run.
+- **No conditional logic in recipes.** A recipe is a fixed sequence with
+  optional parallel fan-out. Loops/branching stay TS (e.g.
+  `implementation/deep`'s kick-back loop). We can revisit declarative
+  conditionals later.
+- **No step composition/includes.** Recipes are flat. No reusing another
+  recipe's steps. (Decision: Q3 = no.)
+- **No replacement of TS built-ins that need logic.** Recipes and TS
+  pipelines coexist; the generic inference path and `implementation/deep`
+  stay TS.
 
-> Combine prompts and various fan-outs. Define it as written here, capture it
-> in a shareable pipeline, refine it over time.
+## Profiles
 
-```markdown
----
-name: code-quality
-description: Audit code & tests in a scope against the repo's own standards, then produce a prioritized action plan.
----
+A **profile** is a named agent. The package ships four:
 
-# code-quality
-
-**Inputs:** `scope` — what's in scope (e.g. "frontend code", "api", "tests").
-
-## 1. Standards & scope  (util, $)
-Identify what code/docs/tests are in scope for this task (`{{scope}}`).
-Assemble the documentation and selected best practices for this repo;
-check for linting config and established standards. Write `standards.md`
-with: the in-scope file set, the standards that apply, and any gaps.
-
-## 2. Review code  (util, $$, parallel)
-Read `standards.md`. For your assigned code area, look for issues with
-logic evaluation, error handling, duplicated code, naming, parameters/args,
-and types. List each as `file:line — issue — severity`. Write
-`code-issues-<area>.md`. Do not edit code.
-
-## 3. Review tests  (util, $$, parallel)
-Read `standards.md` and the in-scope test files. Verify the tests actually
-prove code behavior and that assertions are trustworthy. Look for issues
-with setup/teardown, mocks, over-lenient expectations, and whether test
-cases are focused and small. Write `test-issues-<area>.md`.
-
-## 4. Merge findings & update standards  (research, $$)
-Read `standards.md` and every `*-issues-*.md`. Cross-check for patterns
-across code and tests. Update `standards.md` with any strengthened
-reference standards implied by the findings. Write `findings.md`
-summarizing the patterns.
-
-## 5. Followup & action points  (high, $$$)
-Read `findings.md`. Suggest followup checks or clarifications to do, and
-collect the initial action points for planning. Write `actions-draft.md`.
-
-## 6. Investigate stated issues  (research, $$)
-Read `actions-draft.md` and the original `*-issues-*.md`. For the top
-items, investigate the stated issues in the code/tests and confirm or
-refute each with `file:line` evidence. Write `investigation.md`.
-
-## 7. Final action plan  (high, $$$)
-Read `actions-draft.md` and `investigation.md`. Develop the final,
-prioritized action plan. Write `action-plan.md`.
-
-## 8. Present to user  (high, $$$)
-Summarize `action-plan.md` for the user in their language. Surface the
-decisions to take clearly and concretely. Do not start implementing.
-```
-
-What the recipe had to express, and how the format covers it:
-
-| Need in the example | How it's expressed |
+| Profile | Description (from the agent's frontmatter) |
 |---|---|
-| A scope input the user fills | frontmatter-less `**Inputs:**` line + `{{scope}}` placeholder |
-| Per-step tier + cost class | `(util, $)` / `(util, $$, parallel)` / `(research, $$)` / `(high, $$$)` |
-| A parallel fan-out ("your assigned code area") | the `parallel` keyword on steps 2 & 3 |
-| Steps that read previous steps' outputs | prose naming the `.md` files + an implicit `reads` |
-| A merge/consolidation step | step 4 reads all `*-issues-*.md` |
-| A strong model for judgment, a code model for investigation | `high` for 5/7/8, `research` for 6 |
-| "Present to user" as a real step | step 8 — a step whose task is to summarize, not write a file |
+| `dev` | Low-cost model good at surgical code updates. |
+| `util` | Mechanical work: finding files, summarizing, running tests. |
+| `research` | Review, debugging, documentation, consolidation. |
+| `high` | High-level model for software architecture, planning, judgment. |
+
+- Each profile is an `.md` file in `agents/` (e.g. `agents/dev.md`) with a
+  `description:` in frontmatter. Adding a profile = adding an agent file.
+- The user binds profiles to models via `subagents.agentOverrides` in
+  `~/.pi/agent/settings.json` (existing mechanism — no new config concept).
+- Recipes reference agents by name. Any agent (built-in or custom) can be
+  referenced; the TUI validates that referenced agents are configured.
+- **Cost classes (`$`/`$$`/`$$$`) are dropped.** The plan shows agent names
+  and real resolved models, not abstract cost symbols. The cost shape line
+  becomes `1 util + 2 dev + 3 research + 1 high` — more honest. Real costs
+  are shown in the overview/dashboard per model.
+
+### Migration from the current `tier`/`costClass`
+
+`PlanStep.tier` and `PlanStep.costClass` → just `agent: string`. This touches
+`renderPlan`, `summarizeCost`, the tool `details`, and `renderCostReport` —
+all straightforward edits in `lib.ts`. Done in the same phase as the recipe
+loader so recipes never produce the old fields.
 
 ## Recipe format
 
 A recipe is a markdown file with optional YAML frontmatter and a body of
-numbered step sections. Discovery is by filename (`*.md`) in `pipelines/`
-dirs; the `name` defaults to the filename stem unless frontmatter overrides.
+numbered step sections. Discovery is by `*.md` filename in `pipelines/` dirs.
 
 ### File location & precedence
 
@@ -134,141 +92,165 @@ collision):
 1. Built-in TS pipelines (in `src/lib.ts`)
 2. `~/.pi/agent/pipelines/` (user-global)
 3. `.pi/pipelines/` (project, walking up from cwd)
-4. Package `pipelines/` dirs (declared in a package's `pi` manifest)
+4. Package `pipelines/` dirs (declared in a package's `pi` manifest, or
+   auto-discovered conventionally)
 
 ### Frontmatter (optional)
 
 ```yaml
 ---
 name: code-quality           # defaults to filename stem
-description: one-line, shown by /pipelines
-mode: research               # optional; default effort/framing hint
-effort: standard             # optional default; overridable at invocation
+description: one-line, shown by the TUI list
 inputs:                      # optional; documents placeholders
   - scope
-  - diff-ref
 ---
 ```
 
-All fields optional. `inputs` is documentation + a prompt list; placeholders
-work whether or not they're declared here.
+`mode`/`effort` are **not** accepted for named recipes — a recipe is a
+complete process. (They remain on the generic built-in path only.)
 
 ### Body
 
-The body is a `# <name>` H1 (ignored, just a title) followed by numbered
-`## N. Phase (tier, cost[, flags])` sections. Each section is one step.
+A `# <name>` H1 (title, ignored) followed by numbered
+`## N. Phase (agent[, flags])` sections. Each section is one step.
 
 **Step header grammar:**
 
 ```
-## <number>. <phase>  ( <tier> , <cost> [, parallel] [, reads=<files>] [, output=<file>] )
+## <number>. <phase>  ( <agent> [, parallel] [, reads=<files>] [, output=<file>] )
 ```
 
-- `<tier>` — `util` | `research` | `high` (or a custom agent name; cost class
-  falls back to `$$` for unknown agents, overridable in frontmatter)
-- `<cost>` — `$` | `$$` | `$$$`
-- `parallel` — marks this step as a parallel fan-out slot. The orchestrator
-  runs it N times; the task text tells each slot its assigned area. (N is
-  decided by the parent from the project, not hardcoded — see "Fan-out"
-  below.)
-- `reads=<a.md,b.md>` — optional explicit reads (in addition to files named
-  in the prose)
+- `<agent>` — `dev` | `util` | `research` | `high` | any custom agent name
+- `parallel` — marks a fan-out slot (see Fan-out)
+- `reads=<a.md,b.md>` — optional explicit reads
 - `output=<file>` — optional explicit output filename
 
-Anything in parentheses is optional except tier and cost. The step's body
-paragraphs are the task text, verbatim.
+The section's body paragraphs are the task text, verbatim.
 
-**Placeholders:** `{{name}}` in any frontmatter/step text is substituted at
-plan-build time from the invocation's `inputs`. Missing inputs are surfaced
-to the user (the `/pipeline` command prompts; the tool reports which are
-missing).
+**Placeholders:** `{{name}}` in any text is substituted at plan-build time
+from the invocation's inputs. Missing inputs are surfaced by the overview
+TUI (prompt or report).
+
+**Inputs/reads/output inference:** `output` and `reads` are inferred from
+prose patterns ("Write `findings.md`" → output; "Read `standards.md`" →
+reads) with a simple regex, overridable by explicit flags. (Decision: Q5 =
+infer with pattern.) This is the one bit of magic; flags always win.
 
 ### What the loader produces
 
-Each recipe parses to the existing `Plan` / `PlanStep` types — no new
-runtime types:
+Each recipe parses to the existing `Plan` / `PlanStep` types (with `agent`
+replacing `tier`/`costClass`):
 
 ```ts
 PlanStep {
-  phase, tier, agent, label, task, output?, reads?, parallel?, costClass
+  phase, agent, label, task, output?, reads?, parallel?
+}
+Plan {
+  name, description, summary, steps[]
 }
 ```
 
-- `phase` ← the header's phase text
-- `tier` / `agent` ← the header's tier (agent name == tier for the three
-  built-ins; for a custom agent, `tier` is the closest class default and
-  `agent` is the named agent)
-- `label` ← a short label derived from the phase (or an explicit `label=`
-  flag)
-- `task` ← the section body, with `{{inputs}}` substituted and a `HINTS:`
-  block prepended if the invocation passed hints
-- `output` / `reads` / `parallel` ← from flags or prose inference
-
-Because the output is the same `Plan`, everything downstream (plan rendering,
-dry-run, `summarizeCost`, live progress, `/pipeline-costs`, model pinning,
-OpenRouter fallback) is inherited for free.
+Because the output is `Plan`, everything downstream (plan rendering, dry-run,
+live progress, cost tracking, model pinning, OpenRouter fallback) is
+inherited with the `costClass` removal as the only breaking change.
 
 ## Fan-out: parallel steps
 
-A step marked `parallel` is a *fan-out slot*. The recipe doesn't hardcode N
-— the parent decides N from the project (e.g. one slot per in-scope area
-identified in step 1). Concretely:
+A step marked `parallel` is a fan-out slot. The recipe doesn't hardcode N —
+the parent decides N from the project (e.g. one slot per in-scope area found
+in an earlier step). (Decision: Q2 = infer N from prose.)
 
 - The plan renders a `parallel` step as: "Run this step N times, once per
-  `<area>`. Replace `<area>` in the task with each slot's assignment. Pass
-  the per-area file list as `reads`."
-- The parent's `subagent` call uses the `tasks[]` (parallel) shape, one task
-  per area.
-- `parallel` steps in the *same* phase group run concurrently; a later
-  non-parallel step implicitly waits for all of them (it reads their
-  `*-<area>.md` outputs).
+  `<area>`. Replace `<area>` in the task with each slot's assignment."
+- The parent's `subagent` call uses the `tasks[]` (parallel) shape.
+- A later non-parallel step implicitly waits for all parallel slots (it reads
+  their `*-<area>.md` outputs).
 
-This matches how `research/standard` already works (partition → parallel
-extracts → merge). The recipe just makes the pattern declarative.
+Matches how `research/standard` already works (partition → parallel extracts
+→ merge). The recipe just makes it declarative.
 
-> Open question: should a recipe be able to say *which* earlier step's
-> output defines the fan-out keys (e.g. "fan out over the areas listed in
-> `standards.md`")? For the first cut, no — the parent infers it from the
-> task text, same as today. We can add a `fanout-from=<file>` flag later
-> if inference is unreliable.
+## The TUI
 
-## Invocation & UX
+Three views, replacing the current text command + `/pipeline-costs`.
 
-### `/pipelines` — discovery
+### 1. List view (`/pipeline`)
 
-Lists every available pipeline (built-in + recipes) with description, cost
-shape, and source. A `--verbose` form shows the full step list. Example:
+Browse every available pipeline (built-in TS + recipes). Per entry: name,
+description, step count, agents used, source (built-in / user / project /
+package). Select one to:
+- **Launch** → go to the overview view
+- **View steps** → read the full step list + descriptions
+- **Edit recipe** → open the `.md` in the external editor (recipes only)
+- **Edit profiles** → show the agent→model mapping for this pipeline's
+  agents; edit writes to `subagents.agentOverrides` in settings.json
+- **Remove** → for installed packages, shell out to `pi remove <source>`
+- **Add** → prompt for a source string (git URL, local path, or `npm:name`),
+  shell out to `pi install <source>`, prompt `/reload`
 
-```
-code-quality            8 steps · 3$ + 3$$ + 2$$$ · audit code & tests, produce action plan
-review-pr               4 steps · 1$ + 2$$ + 1$$$ · audit a diff
-research:standard       4 steps · 1$ + 3$$     · multi-source extraction (built-in)
-implementation:deep     7 steps · ...          · drafts + accept loop (built-in)
-```
+### 2. Overview view (pre-run gate)
 
-### `/pipeline <name> [inputs] [--effort=] [--dryrun]`
+Before any dispatch, a rich confirmation:
+- The resolved plan: each step with its agent, task snippet, reads/writes
+- The agent→model mapping for every agent this recipe uses (`dev → kimi-k2.7`,
+  `high → sonnet-5`, …), with each agent's one-sentence description
+- Inputs filled in (or prompted if missing)
+- Estimated cost shape (agent counts; real cost once models are known)
+- Validation: any referenced agent that isn't configured is flagged here
+- Actions: **Confirm** / **Edit inputs** / **Edit profiles** / **Cancel**
 
-Named invocation. Inputs can be inline (`/pipeline code-quality scope="api"`)
-or prompted (`ctx.ui.input`) if a declared input is missing. `--dryrun`
-shows the plan + bill, no dispatch (already implemented for the built-ins).
+On Confirm, the tool returns the plan to the LLM, which executes it with
+`subagent` calls. The dashboard becomes available.
 
-### Natural language
+> **API note:** the overview gates inside the `pipeline` tool handler (the
+> LLM calls the tool; the tool blocks on user confirmation). Pi supports
+> interactive tools (`ctx.ui.confirm`/`select`). A *rich* scrollable TUI via
+> `ctx.ui.custom()` inside a tool handler needs verification — if it doesn't
+> work cleanly, v1 ships as a `confirm` with a rendered text block, and the
+> rich TUI follows once the API is confirmed.
 
-The `pipeline` skill is extended to list available recipes, so the parent
-can pick `code-quality` from a task like "audit the api code quality and
-give me an action plan" — no command needed. This is how skills get
-discovered today; recipes inherit the same path.
+### 3. Dashboard view (during/after run)
 
-### `pi pipeline new <name>`
+Live status + cost, replacing `/pipeline-costs`:
+- Per-step status: pending / running / done / failed, with checkmarks on the
+  plan outline
+- Per active subagent: current tool, path, tokens, turn count (from
+  `tool_execution_update`, same data the status line uses today)
+- Cumulative cost by model (from the cost tracking we already have), updating
+  live
+- When idle (no active run): shows the *last* run's summary + total cost
+- Toggle in/out with `/pipeline` (or a keybinding) — the message stream keeps
+  accumulating behind it
 
-Scaffolds a recipe file in `.pi/pipelines/<name>.md` with frontmatter + a
-3-step skeleton, opened in the external editor. Save → `/reload` → it
-appears in `/pipelines`.
+> **Coexistence note:** during a run the LLM is emitting tool calls into the
+> message stream. The dashboard is a full-screen view you toggle into; the
+> stream continues behind. v1 may ship as a `setWidget` strip (always-visible
+> one-line status + cost) with the full dashboard as v2, if full-screen
+> coexistence proves fiddly.
 
-## Package shipping
+### `/pipeline-costs` is removed
 
-A package declares a `pipelines` dir in its `pi` manifest, mirroring
-`skills`/`agents`:
+Its function (cost breakdown by step + model) is subsumed by the dashboard
+view. When a run is active or has just finished, `/pipeline` shows the
+dashboard; when idle and no last run, it shows the list.
+
+## Invocation model
+
+| Surface | Behavior |
+|---|---|
+| `/pipeline` | Opens the list TUI (or dashboard if a run is active) |
+| `/pipeline <name> [inputs]` | Opens the overview TUI for `<name>` (skips list) |
+| `/pipeline <name> [inputs] --dry-run` | Overview with a no-dispatch flag |
+| Natural language | The `pipeline` skill lists available recipes; the parent picks one and calls the `pipeline` tool, which gates on the overview |
+| `pipeline` tool (LLM) | Takes optional `pipeline` name. If named → load recipe → overview gate → return plan. If unnamed → infer generic built-in (mode/effort) → overview gate → return plan. |
+
+The LLM always executes the steps with `subagent` calls after the overview is
+confirmed. The command and the tool both route through the same overview
+gate, so there's one confirmation path regardless of how the pipeline was
+invoked.
+
+## Package sharing
+
+A package declares a `pipelines` dir in its `pi` manifest:
 
 ```json
 {
@@ -281,66 +263,186 @@ A package declares a `pipelines` dir in its `pi` manifest, mirroring
 }
 ```
 
-Pi auto-discovers `pipelines/` even without a manifest (conventional dir),
-same as the others. A team's "how we review" recipe ships in their shared
-package and is immediately available to everyone who installs it.
+Pi auto-discovers `pipelines/` even without a manifest (conventional dir).
+The TUI's "Add" collects any `pi install` source (git URL, local path,
+`npm:name`) and shells out — so npm works as a source if you later publish,
+but git + local path cover the soft release. Recipes in an installed package
+reference agents the same package ships (e.g. `code-quality` references
+`dev`, and the package ships `agents/dev.md`), so they're self-contained.
 
 ## What stays TS
 
 Built-in pipelines with real logic stay in `src/lib.ts`:
 
+- The generic inference path (unnamed `pipeline` tool call → infer mode/effort
+  → pick a built-in template).
 - `implementation/deep` — the kick-back loop (high rejects → re-run merge up
   to 3×) is a loop, not a fixed sequence.
-- Anything that dynamically sizes fan-out from a subagent's *structured
-  output* (vs. the parent inferring N from prose).
 
-The boundary is: **if the workflow is a fixed checklist, it's a recipe; if it
-needs loops or structured branching, it's TS.** Most of the use-case table
-from the design discussion (review-pr, migrate, test-writing, debug,
-onboarding, postmortem, doc-gen, verify-and-ship) is a fixed checklist and
-becomes a recipe. `code-quality` is a fixed checklist — it becomes a recipe.
+The boundary: **fixed checklist → recipe; needs loops/branching → TS.** Most
+use cases (review-pr, migrate, test-writing, debug, onboarding, postmortem,
+doc-gen, verify-source, code-quality) are fixed checklists → recipes.
 
-## Implementation sketch (not part of this spec, just to sanity-check feasibility)
+## Worked example: `code-quality`
 
-1. `src/recipes.ts` — a markdown parser that turns a recipe file into a
-   `Plan`. Reuses the existing `PlanStep` type. ~150 lines; a real parser
-   needs a small grammar for the step header (tier/cost/flags) but the body
-   is just "collect paragraphs until the next `## `."
-2. `src/discovery.ts` — walk the four `pipelines/` sources, dedupe by name
-   with precedence, return `{name, description, plan, source}[]`.
-3. `pipeline` tool — accept an optional `pipeline` param (a name). If
-   present, load that recipe; else fall back to the current built-in
-   mode+effort inference.
-4. `/pipelines` command — render the discovery list.
-5. `pi pipeline new` — scaffolder (writes a skeleton recipe, opens editor).
-6. Convert two built-ins to recipes (`research-surface`, a new `review-pr`)
-   to prove coexistence; leave `implementation/deep` in TS.
+```markdown
+---
+name: code-quality
+description: Audit code & tests in a scope against the repo's own standards, then produce a prioritized action plan.
+inputs:
+  - scope
+---
 
-No changes to `renderPlan`, `summarizeCost`, `renderProgressStatus`,
-`renderCostReport`, `injectTierModels`, `buildCostStep`, or the
-`before_provider_request` fallback — they all operate on `Plan`/`PlanStep`,
-which recipes produce unchanged.
+# code-quality
 
-## Open questions
+**Inputs:** `scope` — what's in scope (e.g. "frontend code", "api", "tests").
 
-1. **Custom agents & cost class.** If a step names a custom agent (not
-   util/research/high), what cost class does it get? Default `$$`? Or
-   require the recipe to declare it in frontmatter
-   (`agents: { custom: $$ }`)? Lean: default `$$`, overridable in frontmatter.
-2. **Fan-out key inference.** For a `parallel` step, is inferring N from
-   prose ("your assigned area") reliable enough, or do we need
-   `fanout-from=<file>` in the first cut? Lean: ship without it, add if
-   users hit it.
-3. **Step reuse / includes.** Should a recipe be able to include another
-   recipe's steps (e.g. `code-quality` reuses `review-pr`'s review steps)?
-   Lean: no for the first cut — recipes are flat. Composition can come later
-   if a real need surfaces.
-4. **`mode`/`effort` for recipes.** A recipe isn't really "research" or
-   "implementation" — it's its own thing. Should `mode`/`effort` even apply
-   to named recipes, or only to the unnamed built-in inference path? Lean:
-   `effort` still works as a depth knob (a recipe can declare
-   effort-conditional steps — future); `mode` is ignored for named recipes.
-5. **Where do `output`/`reads` come from when not in flags?** Infer from
-   prose ("Write `findings.md`" → output; "Read `standards.md`" → reads)?
-   Lean: infer with a simple pattern, fall back to "no explicit output."
-   This is the riskiest bit of magic; make it overridable via flags.
+## 1. Standards & scope  (util)
+Identify what code/docs/tests are in scope for this task (`{{scope}}`).
+Assemble the documentation and selected best practices for this repo;
+check for linting config and established standards. Write `standards.md`
+with: the in-scope file set, the standards that apply, and any gaps.
+
+## 2. Review code  (dev, parallel)
+Read `standards.md`. For your assigned code area, look for issues with
+logic evaluation, error handling, duplicated code, naming, parameters/args,
+and types. List each as `file:line — issue — severity`. Write
+`code-issues-<area>.md`. Do not edit code.
+
+## 3. Review tests  (dev, parallel)
+Read `standards.md` and the in-scope test files. Verify the tests actually
+prove code behavior and that assertions are trustworthy. Look for issues
+with setup/teardown, mocks, over-lenient expectations, and whether test
+cases are focused and small. Write `test-issues-<area>.md`.
+
+## 4. Merge findings & update standards  (research)
+Read `standards.md` and every `*-issues-*.md`. Cross-check for patterns
+across code and tests. Update `standards.md` with any strengthened
+reference standards implied by the findings. Write `findings.md`
+summarizing the patterns.
+
+## 5. Followup & action points  (high)
+Read `findings.md`. Suggest followup checks or clarifications to do, and
+collect the initial action points for planning. Write `actions-draft.md`.
+
+## 6. Investigate stated issues  (dev)
+Read `actions-draft.md` and the original `*-issues-*.md`. For the top
+items, investigate the stated issues in the code/tests and confirm or
+refute each with `file:line` evidence. Write `investigation.md`.
+
+## 7. Final action plan  (high)
+Read `actions-draft.md` and `investigation.md`. Develop the final,
+prioritized action plan. Write `action-plan.md`.
+
+## 8. Present to user  (high)
+Summarize `action-plan.md` for the user in their language. Surface the
+decisions to take clearly and concretely. Do not start implementing.
+```
+
+## Worked example: `verify-source`
+
+```markdown
+---
+name: verify-source
+description: Scan docs, verify every quote/citation against its original source.
+inputs:
+  - target
+---
+
+# verify-source
+
+**Inputs:** `target` — the docs to scan (path or glob).
+
+## 1. Inventory citations  (util)
+Scan `{{target}}`. List every quote and citation with its location and the
+source it claims. Write `citations.md`.
+
+## 2. Fetch & verify  (dev, parallel)
+Read `citations.md`. For your assigned batch, find the original source
+carefully and confirm the quote is exact and the citation is correct. Mark
+each verified / mismatched / unfindable. Write `verify-<batch>.md`.
+
+## 3. Flag mismatches  (research)
+Read every `verify-*.md`. List mismatches and unfindable sources with
+severity. Write `issues.md`.
+
+## 4. Report  (high)
+Summarize `issues.md` for the user: what's verified, what's broken, what
+needs a human to track down.
+```
+
+Invoked as:
+```
+/pipeline verify-source "scan /docs and check all links, find the original
+carefully and ensure quotes are exact and citations are verified"
+```
+The task string fills `{{target}}` (or the overview prompts for it), the
+recipe provides the 4-step shape, the overview shows the agent→model mapping,
+and the dashboard tracks the run.
+
+## Implementation phasing
+
+The TUI is larger than the recipe loader, so we ship in slices — each phase
+is independently useful:
+
+**Phase 1 — Recipes + profiles (the core).**
+- Add `agents/dev.md`, drop `costClass`/`tier` → `agent` across `lib.ts`.
+- Recipe parser (`src/recipes.ts`): markdown → `Plan`.
+- Discovery (`src/discovery.ts`): walk the four `pipelines/` sources.
+- `pipeline` tool: accept optional `pipeline` name; load recipe or infer.
+- `/pipelines` text command (interim, until the TUI list ships).
+- Convert two built-ins to recipes to prove coexistence.
+- Tests for the parser + discovery + profile migration.
+
+**Phase 2 — Overview TUI (preview gate).**
+- Rich pre-run confirmation (or `confirm`+text v1 if `ctx.ui.custom()` in a
+  tool handler needs API work).
+- Agent→model mapping display + validation.
+- Input prompting.
+
+**Phase 3 — List TUI.**
+- `/pipeline` opens the browse list (replaces the interim `/pipelines` text
+  command).
+- Launch / view steps / edit recipe / edit profiles.
+
+**Phase 4 — Dashboard TUI (replaces `/pipeline-costs`).**
+- Live status + cost during a run.
+- Last-run summary when idle.
+- Remove `/pipeline-costs`.
+
+**Phase 5 — Add/remove from the TUI.**
+- Collect source, shell out to `pi install`/`pi remove`, prompt reload.
+
+**Phase 6 — `pi pipeline new <name>` scaffolder.**
+- Skeleton recipe + external editor.
+
+## Resolved open questions
+
+1. **Profiles** → a flat roster of named agents (`dev`, `util`, `research`,
+   `high`), each with a one-sentence description from its agent frontmatter.
+   The user binds them to models via `subagents.agentOverrides` and confirms
+   the mapping in the overview TUI. Cost classes (`$`/`$$`/`$$$`) dropped.
+2. **Fan-out N** → inferred from prose by the parent. (No `fanout-from`
+   flag in v1.)
+3. **Step composition** → no. Recipes are flat.
+4. **Mode/effort for named recipes** → not applicable. A recipe is an
+   opinionated process; the task string implies the specifics. Mode/effort
+   only exists on the unnamed generic inference path.
+5. **Output/reads** → inferred from prose with a simple pattern, overridable
+   by explicit flags.
+
+## Remaining open questions
+
+1. **Dashboard coexistence** — full-screen toggle vs. always-visible widget
+   strip for v1? Lean: ship a `setWidget` strip in Phase 4, full dashboard
+   when coexistence is proven.
+2. **`ctx.ui.custom()` in a tool handler** — does the rich overview TUI work
+   inside the `pipeline` tool's `execute`? If not, v1 overview is
+   `confirm`+text. Needs an API spike before Phase 2.
+3. **Per-recipe profile notes** — should a recipe be able to add a per-use
+   sentence to a profile ("in this recipe, `dev` reads code and finds
+   issues")? Lean: no for v1; the global agent description is enough.
+4. **Generic inference path survival** — keep the unnamed `pipeline` tool
+   call (infer mode/effort → built-in template) as a fallback, or require
+   every invocation to name a recipe? Lean: keep it; it's the "I don't have
+   a recipe for this" escape hatch.
