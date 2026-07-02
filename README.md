@@ -87,27 +87,33 @@ The three tier agents are mapped to models via `subagents.agentOverrides` in `~/
 {
   "subagents": {
     "agentOverrides": {
-      "high":     { "model": "openrouter/anthropic/claude-sonnet-5", "thinking": "high" },
-      "research": { "model": "openrouter/z-ai/glm-5.2",            "thinking": "medium" },
-      "util":     { "model": "openrouter/minimax/minimax-m3",     "thinking": "low" }
+      "high":     { "model": "openrouter/anthropic/claude-sonnet-5", "thinking": "high",
+                   "fallbackModels": ["~openai/gpt-mini-latest"] },
+      "research": { "model": "openrouter/z-ai/glm-5.2",            "thinking": "medium",
+                   "fallbackModels": ["google/gemini-3.5-flash", "qwen/qwen3.7-max"] },
+      "util":     { "model": "openrouter/minimax/minimax-m3",     "thinking": "low",
+                   "fallbackModels": ["moonshotai/kimi-k2.7-code"] },
+      "dev":      { "model": "openrouter/moonshotai/kimi-k2.7-code", "thinking": "low",
+                   "fallbackModels": ["minimax/minimax-m3"] }
     }
   }
 }
 ```
 
-> **Note:** pi's `agentOverrides.<agent>.fallbackModels` field is currently a **no-op** (as of pi 0.80.x) — pi-ai only does same-model retry. Rate-limit / downtime failover is handled instead by this package's `before_provider_request` hook (see **Model fallback** below); you do **not** need `fallbackModels` here.
+> **Use both fallback layers.** `agentOverrides.<agent>.fallbackModels` is honored by pi-subagents: on a retryable failure (429 / rate-limit / overloaded) it retries the next model **client-side**, producing the per-attempt cascade visible in `/pipeline-audit`. This package *also* injects OpenRouter's server-side `models` array (see **Model fallback** below) so the provider tries the chain before returning an error at all. The two compose: server-side first, client-side as the reliable net. (An earlier version of this note called `fallbackModels` a no-op — that was outdated and is no longer true.)
 
 ### Model fallback (rate-limits / downtime)
 
-This package wires OpenRouter's native server-side failover: before every provider call (parent **and** subagents), a `before_provider_request` handler injects a `models` array into the payload based on which class the current primary `model` belongs to. OpenRouter then tries the primary first and falls through to the rest on rate-limits, downtime, moderation, or context-length errors — no client retry logic required. (Docs: https://openrouter.ai/docs/guides/routing/model-fallbacks)
+This package wires OpenRouter's native server-side failover: before every provider call (parent **and** subagents), a `before_provider_request` handler injects a `models` array into the payload based on which class the current primary `model` belongs to. OpenRouter then tries the primary first and falls through to the rest on rate-limits, downtime, moderation, or context-length errors. This is the first line of defense; the `fallbackModels` lists above are the client-side second line.
 
 The three pipeline tiers map to three fallback classes:
 
-| Tier | Class | Primary | Fallbacks |
+| Profile | Class | Primary | Server-side fallbacks (this package) |
 |---|---|---|---|
-| `util` ($) | utility | `minimax/minimax-m3` | `moonshotai/kimi-k2.7-code` |
-| `research` ($$) | coding | `z-ai/glm-5.2` | `google/gemini-3.5-flash` → `qwen/qwen3.7-max` |
-| `high` ($$$) | stronger | `anthropic/claude-sonnet-5` | `~openai/gpt-mini-latest` |
+| `dev` | utility | `moonshotai/kimi-k2.7-code` | `minimax/minimax-m3` |
+| `util` | utility | `minimax/minimax-m3` | `moonshotai/kimi-k2.7-code` |
+| `research` | coding | `z-ai/glm-5.2` | `google/gemini-3.5-flash` → `qwen/qwen3.7-max` |
+| `high` | stronger | `anthropic/claude-sonnet-5` | `~openai/gpt-mini-latest` |
 
 This composes with pi's existing same-model retry (which still retries the *same* model on transient 429/network errors) — the fallback chain only engages when OpenRouter itself returns an error for the primary.
 
