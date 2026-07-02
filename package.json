@@ -1,0 +1,61 @@
+{
+  "name": "pi-pipeline",
+  "version": "0.3.0",
+  "description": "Effort-scaled multi-agent pipeline for pi. Three tiers (high/research/util), two modes (research/implementation), three effort levels. Ships a `pipeline` tool, a `/pipeline` command, a `/pipeline-costs` cost breakdown, and live per-step progress.",
+  "license": "MIT",
+  "author": "somebox/Jeremy Seitz",
+  "homepage": "https://github.com/somebox/pi-pipeline#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/somebox/pi-pipeline.git"
+  },
+  "bugs": {
+    "url": "https://github.com/somebox/pi-pipeline/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "subagents",
+    "agents",
+    "multi-agent",
+    "pipeline"
+  ],
+  "files": [
+    "src",
+    "agents",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ],
+    "subagents": {
+      "agents": [
+        "./agents"
+      ]
+    },
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "test:verbose": "node --test --experimental-strip-types --test-reporter spec test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

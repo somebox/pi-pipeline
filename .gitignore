@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+
+# build artifacts
+*.tsbuildinfo
+dist/
+
+# logs
+*.log
+npm-debug.log*
+
+# os / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
