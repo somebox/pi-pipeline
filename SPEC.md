@@ -385,20 +385,26 @@ and the dashboard tracks the run.
 The TUI is larger than the recipe loader, so we ship in slices — each phase
 is independently useful:
 
-**Phase 1 — Recipes + profiles (the core).**
+**Phase 1 — Recipes + profiles + metrics (the core).**
 - Add `agents/dev.md`, drop `costClass`/`tier` → `agent` across `lib.ts`.
+- Typed `RunMetrics` as the single source of truth for run cost/time/tokens,
+  captured for every run (per-step, per-attempt, per-model). Replaces the
+  ad-hoc `PipelineCostReport` internals while keeping the same data.
 - Recipe parser (`src/recipes.ts`): markdown → `Plan`.
 - Discovery (`src/discovery.ts`): walk the four `pipelines/` sources.
 - `pipeline` tool: accept optional `pipeline` name; load recipe or infer.
 - `/pipelines` text command (interim, until the TUI list ships).
 - Convert two built-ins to recipes to prove coexistence.
-- Tests for the parser + discovery + profile migration.
+- Tests for the parser + discovery + profile migration + metrics.
 
 **Phase 2 — Overview TUI (preview gate).**
 - Rich pre-run confirmation (or `confirm`+text v1 if `ctx.ui.custom()` in a
   tool handler needs API work).
 - Agent→model mapping display + validation.
 - Input prompting.
+- Generic-path check: when no recipe was named, surface that and offer close
+  recipes before confirming.
+- Metrics drive the cost estimate in the overview.
 
 **Phase 3 — List TUI.**
 - `/pipeline` opens the browse list (replaces the interim `/pipelines` text
@@ -406,7 +412,7 @@ is independently useful:
 - Launch / view steps / edit recipe / edit profiles.
 
 **Phase 4 — Dashboard TUI (replaces `/pipeline-costs`).**
-- Live status + cost during a run.
+- Live status + cost during a run, driven by `RunMetrics`.
 - Last-run summary when idle.
 - Remove `/pipeline-costs`.
 
@@ -422,6 +428,8 @@ is independently useful:
    `high`), each with a one-sentence description from its agent frontmatter.
    The user binds them to models via `subagents.agentOverrides` and confirms
    the mapping in the overview TUI. Cost classes (`$`/`$$`/`$$$`) dropped.
+   `dev` is a standard fourth profile ("low-cost model good at surgical code
+   updates").
 2. **Fan-out N** → inferred from prose by the parent. (No `fanout-from`
    flag in v1.)
 3. **Step composition** → no. Recipes are flat.
@@ -430,6 +438,19 @@ is independently useful:
    only exists on the unnamed generic inference path.
 5. **Output/reads** → inferred from prose with a simple pattern, overridable
    by explicit flags.
+6. **Generic inference path** → kept as the "I don't have a recipe" escape
+   hatch, but the overview gate surfaces that no specific recipe was selected
+   and offers a pick-list of close recipes before confirming. So the user is
+   always aware they're on the generic path and can flip to a named recipe.
+   Covers both `/pipeline <task>` (no name) and unnamed `pipeline` tool calls,
+   including when the LLM infers generic where a named recipe would fit better.
+7. **Metrics** → every run captures a typed `RunMetrics` record (per-step,
+   per-attempt, per-model usage: input/output/cacheRead/cacheWrite/cost/turns,
+   plus durationMs and toolCount). This is the single source of truth for all
+   future consumers — overview TUI, dashboard, footer widget, reports — so they
+   answer "per-step cost", "per-model cost", "total run cost", "session
+   cumulative", and "time per step/model" without re-deriving. Captured for
+   every run regardless of whether a cost command is invoked.
 
 ## Remaining open questions
 
