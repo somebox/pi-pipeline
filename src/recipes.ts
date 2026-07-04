@@ -284,7 +284,7 @@ export function compileRecipeToChain(plan: Plan): any[] {
 	for (const step of plan.steps) {
 		const isIterate = typeof step.iterate === "string" && step.iterate.length > 0;
 		if (isIterate) {
-			const sourceName = step.iterate!;
+			const sourceName = step.iterate!.replace(/[^A-Za-z0-9_]/g, "_");
 			const itemVar = "unit";
 			// Build the expand block referencing the unit-list source file by as-name
 			const expand = {
@@ -317,7 +317,7 @@ export function compileRecipeToChain(plan: Plan): any[] {
 				expand,
 				parallel,
 				collect: {
-					as: `collected-${sourceName}`,
+					as: `collected_${sourceName}`,
 				},
 			});
 		} else {
@@ -335,7 +335,7 @@ export function compileRecipeToChain(plan: Plan): any[] {
 				item.output = step.output;
 				// Auto-register structured schema if output file is a .json file
 				if (step.output.endsWith(".json")) {
-					const stem = step.output.replace(/\.json$/, "");
+					const stem = step.output.replace(/\.json$/, "").replace(/[^A-Za-z0-9_]/g, "_");
 					item.as = stem;
 					item.outputSchema = {
 						type: "object",

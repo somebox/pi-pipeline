@@ -311,7 +311,7 @@ test("compileRecipeToChain: translates single standard step with .json output to
 	const chain = compileRecipeToChain(plan);
 	assert.equal(chain.length, 1);
 	assert.equal(chain[0].agent, "util");
-	assert.equal(chain[0].as, "scope-files"); // parsed from output filename
+	assert.equal(chain[0].as, "scope_files"); // parsed from output filename and slugified to safe name
 	assert.equal(chain[0].output, "scope-files.json");
 	assert.deepEqual(chain[0].outputSchema, {
 		type: "object",
@@ -340,7 +340,7 @@ test("compileRecipeToChain: translates iterate step to expand/parallel subagent 
 	assert.equal(chain.length, 1);
 	assert.equal(chain[0].phase, "Summarize");
 	assert.deepEqual(chain[0].expand, {
-		from: { output: "scope-files", path: "/items" },
+		from: { output: "scope_files", path: "/items" },
 		item: "unit",
 		key: "/path",
 		maxItems: 100,
@@ -349,6 +349,6 @@ test("compileRecipeToChain: translates iterate step to expand/parallel subagent 
 	assert.equal(chain[0].parallel.task, "Do for {unit.path}");
 	assert.equal(chain[0].parallel.output, "summary-{unit.path}.md");
 	assert.deepEqual(chain[0].parallel.tools, ["read", "write"]);
-	assert.deepEqual(chain[0].collect, { as: "collected-scope-files" });
+	assert.deepEqual(chain[0].collect, { as: "collected_scope_files" });
 });
 
