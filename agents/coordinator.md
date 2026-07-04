@@ -1,7 +1,7 @@
 ---
 name: coordinator
 description: High-tier agent for orchestration and prompt parameterization — writes the per-unit prompt templates and structures unit lists.
-tools: read, grep, find, ls, write, edit
+tools: read, grep, find, ls, write, edit, structured_output
 thinking: high
 systemPromptMode: replace
 inheritProjectContext: true

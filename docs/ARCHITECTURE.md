@@ -45,10 +45,17 @@ accumulated 188k tokens, then 400'd on a model-limit mismatch — see
    a slim shared onboarding + the prompt — and a **bounded tool set** so
    they *can't* explore. "Bounded" means the agent's normal tools *minus
    exploration tools* (`ls`, `find`, `grep`) — not a fixed `{read, write}`
-   allowlist — so it composes with whatever a custom agent brings. This is a
-   general per-step `tools=` override, not an iteration-only default: any
-   step benefits from a minimal tool set (e.g. `code-quality` step 8
-   "Present" needs only `read`). Small context is enforced, not requested.
+   allowlist — so it composes with whatever a custom agent brings. A recipe
+   step can *declare* `tools=<list>` for documentation/validation, but
+   enforcement is **agent-level only**: pi-subagents' compiled chain schema
+   (`ChainItem`, `DynamicParallelTemplateSchema`) has no per-task `tools`
+   field at all (`additionalProperties: false`), confirmed by the Phase 2
+   spike against a real repo. So the real lever is picking (or adding) an
+   agent whose own `tools:` frontmatter matches the bound you want — e.g.
+   `code-quality` step 8 "Present" should route to an agent whose `tools:`
+   is just `read`, not declare `tools=read` on the step. Small context is
+   enforced by agent choice, not requested via a step flag that the runtime
+   would reject anyway.
 6. **Coordinator is opt-in, split into two concerns.** Enumeration is often
    mechanical (a glob — no agent call); authoring a good per-unit prompt is
    judgment (a `coordinator` agent). The parent LLM doesn't write per-unit

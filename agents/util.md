@@ -1,7 +1,7 @@
 ---
 name: util
 description: Low-tier agent for mechanical work: finding files, summarizing raw context, editing, running tests, fetching remote content, comparing git history. Follows explicit specs.
-tools: read, grep, find, ls, bash, write, edit
+tools: read, grep, find, ls, bash, write, edit, structured_output
 thinking: low
 systemPromptMode: replace
 inheritProjectContext: true

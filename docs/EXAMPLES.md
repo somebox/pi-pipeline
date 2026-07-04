@@ -7,7 +7,7 @@
 
 ## Shipped recipes
 
-The package ships four recipes in [`pipelines/`](../pipelines/). Each
+The package ships six recipes in [`pipelines/`](../pipelines/). Each
 illustrates a different shape.
 
 ### `code-quality` — a fixed checklist (no iteration)
@@ -32,24 +32,35 @@ Scan docs, verify every quote/citation against its original source. Four
 steps; step 2 uses the legacy `parallel` flag (soft fan-out). A good minimal
 example of a non-iterating recipe with fan-out.
 
-### `summarize-files` — the simplest iteration (proof-of-concept)
+### `summarize-files` — the simplest iteration (proof-of-concept, shipped and verified)
 
-File: [`pipelines/summarize-files.md`](../pipelines/summarize-files.md) *(to be added in Phase 2)*
+File: [`pipelines/summarize-files.md`](../pipelines/summarize-files.md)
 
 The proof-of-concept for context isolation by construction. Mechanical
 enumeration (a `util` step writes `scope-files.json` from a glob — no
 `coordinator`); the step's own prose is the per-unit prompt (no
 `per-unit-prompt.md`); one bounded `dev` per file; a `research` reduce step.
 Each map dispatch is ~5k tokens and isolated — bloat is impossible by
-construction. This is the recipe to validate against a real repo in Phase 2:
-the audit should show N small dispatches vs one bloated one.
+construction. Verified live against a real repo (`~/src/cards`, a Go
+codebase): the enumerate step wrote 3 files via `structured_output`, and 3
+parallel `dev` slots each read one file and wrote a correct, distinct
+summary — N small dispatches, not one bloated one. Note it does *not* use
+`tools=` on any step; the shape is small enough that the agent's own default
+tool set is already bounded.
 
-Reference shape (target, not yet shipped):
-```markdown
-## 1. Enumerate files  (util, output=scope-files.json, tools=read)
-## 2. Summarize each file  (dev, iterate=scope-files, output=summary-{unit.path}.md)
-## 3. Merge summaries  (research, reads=summary-*.md, output=summaries.md)
-```
+### `housekeeping`, `docs-audit`, `probe` — additional shipped recipes
+
+Files: [`pipelines/housekeeping.md`](../pipelines/housekeeping.md),
+[`pipelines/docs-audit.md`](../pipelines/docs-audit.md),
+[`pipelines/probe.md`](../pipelines/probe.md).
+
+`housekeeping` mirrors `code-quality`'s fixed-checklist shape (util →
+`parallel` dev review → research consolidation → high prioritization) but for
+general technical-debt sweeps. `docs-audit` is a heavier checklist with an
+iteration step in the middle (`dev, iterate=inventory`) restructuring docs
+file-by-file. `probe` is a minimal single-step recipe used to sanity-check the
+now-deprecated `maxTools` soft budget against an unbounded run — kept as a
+regression fixture, not a template to copy for new recipes.
 
 ### `screenshot-worklog` — iteration over non-files, with a coordinator
 
@@ -62,9 +73,11 @@ the "judgment enumeration" case — a `coordinator` step loads the engineering
 board and writes both `shots.json` and `per-unit-prompt.md` (the matching
 logic is complex enough to warrant an authored template). Step 2 is a
 per-unit *chain* (commits → match → review → attach → rename → file) owned
-by one focused `dev` with `tools=read,write,bash`. The small-context
-guarantee holds because the subagent sees one screenshot + the shared board
-list + the prompt — not the whole repo or all screenshots.
+by one focused `dev` agent whose *own* `tools:` frontmatter is `read, write,
+bash` (not a per-step override — see SPEC.md's `tools=` note: the compiled
+chain schema has no such field, so the bound has to live on the agent). The
+small-context guarantee holds because the subagent sees one screenshot + the
+shared board list + the prompt — not the whole repo or all screenshots.
 
 Reference shape (target):
 ```markdown

@@ -308,9 +308,11 @@ export function compileRecipeToChain(plan: Plan): any[] {
 				// Translate placeholder from {unit} syntax to {unit.path} for absolute pathing safely
 				parallel.output = step.output.replace(/\{unit\}/g, "{unit.path}");
 			}
-			if (step.tools && step.tools.length > 0) {
-				parallel.tools = step.tools;
-			}
+			// NOTE: pi-subagents' DynamicParallelTemplateSchema has no `tools` field
+			// (additionalProperties: false) — a per-task tools override is rejected
+			// outright by the tool call schema. Tool bounding is enforced at the
+			// *agent* level (agents/*.md `tools:` frontmatter) instead; see
+			// docs/PLAN.md open question #5. step.tools is intentionally not emitted here.
 			chain.push({
 				phase: step.phase,
 				label: step.label,
@@ -355,9 +357,9 @@ export function compileRecipeToChain(plan: Plan): any[] {
 					};
 				}
 			}
-			if (step.tools && step.tools.length > 0) {
-				item.tools = step.tools;
-			}
+			// NOTE: pi-subagents' ChainItem schema has no `tools` field either
+			// (additionalProperties: false). Same rationale as the dynamic-parallel
+			// branch above — step.tools is intentionally not emitted here.
 			chain.push(item);
 		}
 	}

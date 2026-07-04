@@ -1,14 +1,19 @@
 ---
 name: pipeline
 description: |
-  Effort-scaled multi-agent pipeline that uses three tiers (high / research / util)
-  and avoids putting expensive models on mechanical work. Use when the user wants
-  a structured multi-step task done with cost awareness. Two modes: "research"
-  (read-only/extraction, parent writes the spec, no high-tier calls in
-  surface/standard) and "implementation" (code changes, high plans and accepts).
-  The pipeline tool returns a numbered plan with per-step cost class ($ / $$ /
-  $$$); the parent executes each step with subagent calls. Supports a dryRun
-  flag that prints the cost shape without dispatching any subagents.
+  Multi-agent pipeline that avoids putting expensive models on mechanical
+  work. Two ways to run it: (1) a named recipe (markdown file in pipelines/,
+  "code-quality", "summarize-files", etc.) — a complete opinionated process,
+  optionally with iterate= steps that fan out one bounded subagent per unit
+  for small-context-by-construction loops; (2) the generic inferred path with
+  two modes, "research" (read-only/extraction, parent writes the spec, no
+  high-tier calls in surface/standard) and "implementation" (code changes,
+  high plans and accepts), each scaled by an effort knob (surface/standard/
+  deep). The pipeline tool returns a numbered plan naming an agent
+  (high/research/dev/util/coordinator) per step; for named recipes with
+  iteration it also returns a pre-compiled subagent chain to execute
+  verbatim. Supports a dryRun flag that prints the plan/cost shape without
+  dispatching any subagents.
 ---
 
 # Pipeline
@@ -62,17 +67,38 @@ If a step is too expensive, override per-run: pass `[model=openrouter/.../...che
 
 ## How to use
 
-Call the `pipeline` tool with up to four parameters:
+Call the `pipeline` tool with up to five parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `task`    | string | The task description, in the user's words or paraphrased. |
-| `mode`    | `"research"` \| `"implementation"` (optional) | Pick the pipeline shape. Omit to infer from the task. |
-| `effort`  | `"surface"` \| `"standard"` \| `"deep"` (optional) | The depth. Omit to infer. |
+| `pipeline` | string (optional) | Name of a shipped/discovered recipe (see **Named recipes** below) instead of the generic inferred path. |
+| `mode`    | `"research"` \| `"implementation"` (optional) | Pick the pipeline shape. Omit to infer from the task. Ignored when `pipeline` is set — a named recipe is a complete process. |
+| `effort`  | `"surface"` \| `"standard"` \| `"deep"` (optional) | The depth. Omit to infer. Ignored when `pipeline` is set. |
 | `hints`   | string[] (optional) | Constraints, prior decisions, non-default requirements, files of interest. |
+| `inputs`  | object (optional) | Named `{{placeholder}}` values a recipe declares (e.g. `{ glob: "src/*.ts" }`). |
 | `dryRun`  | boolean (optional) | If true, print the plan with cost shape but dispatch no subagents. Default false. |
 
-The tool returns a structured **plan** as text. The plan is a numbered list of steps. Each step names a tier (high / research / util) and gives a concrete subagent task. You execute each step with a `subagent` call.
+The tool returns a structured **plan** as text. The plan is a numbered list of steps. Each step names an agent (high / research / util / dev / coordinator / custom) and gives a concrete subagent task. You execute each step with a `subagent` call.
+
+### Named recipes and iteration
+
+Run `/pipelines` to list discovered recipes (user `~/.pi/agent/pipelines/`,
+project `.pi/pipelines/`, and package `pipelines/` dirs, later wins on name
+collision) plus the built-in generic path. Pass `pipeline: "<name>"` to run
+one instead of inferring mode/effort — a named recipe is a complete process
+with no `mode`/`effort` knobs.
+
+Some recipe steps declare `iterate=<name>`: one bounded subagent per unit in
+a prior step's enumerated list (small context by construction, not one
+subagent reading everything). When you call `pipeline` on a named recipe
+(and it's not a `dryRun`), the tool returns a pre-compiled `pi-subagents`
+chain (in the response text and in `details.chain`) with `expand`/`parallel`/
+`collect` blocks already wired up — **call `subagent` with that exact chain
+argument, verbatim.** Do not hand-author or edit the chain yourself: the
+compiled shape accounts for runtime constraints (e.g. safe output-name
+characters, the mandatory `collect` block) that are easy to get wrong by
+hand.
 
 ### Execution
 
@@ -121,12 +147,17 @@ The package also registers a `/pipeline` slash command. The user can invoke it d
 
 The slash command prepends a "use the pipeline tool" instruction to your context; you then proceed as if the user asked normally.
 
-## Three tiers (one-liner reference)
+## Agent roster (one-liner reference)
 
-| Tier | Agent name | Tools | When |
-|------|------------|-------|------|
-| `high` | `high` | read-only | plan, judgment, accept. Never edits. |
-| `research` | `research` | read, write, edit | review, debug, consolidate, docs. |
-| `util` | `util` | read, write, edit, bash | mechanical: gather, edit, test, fetch, git. |
+| Agent | Tools | When |
+|-------|-------|------|
+| `high` | read-only | plan, judgment, accept. Never edits. |
+| `research` | read, write, edit | review, debug, consolidate, docs. |
+| `dev` | read, write, edit, bash | surgical code updates — reads code, reasons about it, makes targeted edits. |
+| `util` | read, write, edit, bash | mechanical: gather, edit, test, fetch, git. Follows explicit specs. |
+| `coordinator` | read, write, edit | opt-in, judgment-heavy enumeration — writes per-unit prompt templates and unit lists. Not used unless a recipe names it. |
 
-These are the only three agents the pipeline references. The package's `agentOverrides` in `~/.pi/agent/settings.json` maps each tier to an explicit openrouter model. The mapping is at the package level, not the skill — the user configures it once.
+A profile is just an agent — there's no separate cost-class concept. The
+package's `agentOverrides` in `~/.pi/agent/settings.json` maps each agent
+name to an explicit model. The mapping is at the package level, not the
+skill — the user configures it once.

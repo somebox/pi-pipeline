@@ -1,7 +1,7 @@
 ---
 name: dev
 description: Low-cost model good at surgical code updates — reads code, reasons about it, makes targeted edits.
-tools: read, grep, find, ls, bash, write, edit
+tools: read, grep, find, ls, bash, write, edit, structured_output
 thinking: low
 systemPromptMode: replace
 inheritProjectContext: true

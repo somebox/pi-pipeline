@@ -51,9 +51,21 @@ A `# <name>` H1 (title, ignored) followed by numbered
   contain `{unit}` for iterate steps.
 - `iterate=<name>` — bind to a prior step's `<name>.json` unit list (see
   **Iteration steps**). Also inferrable from "For each `{unit}` in <name>..." prose.
-- `tools=<list>` — optional tool allowlist/override for this step (e.g.
-  `tools=read,write`). Default: the agent's normal tools **minus exploration
-  tools** (`ls`, `find`, `grep`) — see ARCHITECTURE.md principle #5. `bash` is opt-in.
+- `tools=<list>` — documents an intended tool bound for this step (e.g.
+  `tools=read,write`); parsed onto `PlanStep.tools` for validation/display, but
+  **not emitted into the compiled chain** — pi-subagents' `ChainItem` and
+  `DynamicParallelTemplateSchema` both reject unknown keys (`additionalProperties:
+  false`) and neither has a `tools` field, so a per-step override is rejected
+  outright by the tool call schema. Real enforcement is agent-level only: pick
+  an agent (or add a bounded variant, e.g. `dev-bounded.md`) whose own
+  `tools:` frontmatter matches what you want. See ARCHITECTURE.md principle #5
+  and docs/PLAN.md open question #5.
+
+  **Agent `tools:` gotcha:** any agent with an explicit `tools:` allowlist
+  must include `structured_output`, or every step with `outputSchema` routed
+  to it fails with "Missing structured_output call" — `--tools` allowlists
+  built-in, extension, *and* dynamically-registered tools, and
+  `structured_output` is registered per-step by the runtime, not a built-in.
 - `parallel` (legacy) — soft fan-out hint; superseded by `iterate=`.
 - `maxTools` (deprecated) — see ARCHITECTURE.md Non-goals.
 

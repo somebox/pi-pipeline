@@ -1,6 +1,6 @@
 {
   "name": "pi-pipeline",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Effort-scaled multi-agent pipeline for pi. Three tiers (high/research/util), two modes (research/implementation), three effort levels. Ships a `pipeline` tool, a `/pipeline` command, a `/pipeline-costs` cost breakdown, and live per-step progress.",
   "license": "MIT",
   "author": "somebox/Jeremy Seitz",

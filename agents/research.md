@@ -1,7 +1,7 @@
 ---
 name: research
 description: Mid-tier agent for review, debugging, documentation, and consolidation. Reads and edits but does not run tests or fetch remote content.
-tools: read, grep, find, ls, write, edit
+tools: read, grep, find, ls, write, edit, structured_output
 thinking: medium
 systemPromptMode: replace
 inheritProjectContext: true

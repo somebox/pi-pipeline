@@ -331,6 +331,16 @@ test("compileRecipeToChain: translates single standard step with .json output to
 	});
 });
 
+test("compileRecipeToChain: sequential step never emits tools (schema has no such field)", () => {
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, tools=read,write)\nDo the thing.",
+		nameFallback: "x",
+	});
+	const chain = compileRecipeToChain(plan);
+	assert.equal(chain.length, 1);
+	assert.equal(chain[0].tools, undefined);
+});
+
 test("compileRecipeToChain: translates iterate step to expand/parallel subagent block", () => {
 	const plan = buildPlanFromRecipe({
 		raw: "---\nname: x\n---\n# x\n\n## 1. Summarize (dev, iterate=scope-files, output=summary-{unit}.md, tools=read,write)\nDo for {unit.path}",
@@ -348,7 +358,10 @@ test("compileRecipeToChain: translates iterate step to expand/parallel subagent 
 	assert.equal(chain[0].parallel.agent, "dev");
 	assert.equal(chain[0].parallel.task, "Do for {unit.path}");
 	assert.equal(chain[0].parallel.output, "summary-{unit.path}.md");
-	assert.deepEqual(chain[0].parallel.tools, ["read", "write"]);
+	// pi-subagents' DynamicParallelTemplateSchema rejects unknown keys (additionalProperties:
+	// false) and has no `tools` field — the compiler must not emit step.tools into the chain
+	// even though the recipe parsed a tools= flag. Tool bounding is agent-level only.
+	assert.equal(chain[0].parallel.tools, undefined);
 	assert.deepEqual(chain[0].collect, { as: "collected_scope_files" });
 });
 

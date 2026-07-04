@@ -1,7 +1,7 @@
 ---
 name: high
 description: High-tier read-only agent for planning, judgment, and acceptance. Use sparingly. Read-only tools; never edits or runs commands.
-tools: read, grep, find, ls
+tools: read, grep, find, ls, structured_output
 thinking: high
 systemPromptMode: replace
 inheritProjectContext: true

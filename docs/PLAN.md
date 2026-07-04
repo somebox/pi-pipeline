@@ -6,8 +6,9 @@
 
 ## Implementation phasing
 
-Shipped in slices — each phase is independently useful. **Phases 1 and the
-audit are done; the next big lever is the iteration runtime.**
+Shipped in slices — each phase is independently useful. **Phases 1 and 2
+(recipes, profiles, metrics, and iteration via compile-to-chain) are done and
+verified live against a real repo; the next big lever is the overview TUI.**
 
 **Phase 1 — Recipes + profiles + metrics (DONE).**
 - `agents/dev.md`; dropped `costClass`/`tier` → `agent`.
@@ -26,27 +27,52 @@ audit are done; the next big lever is the iteration runtime.**
 - Model-limit override docs (`~/.pi/agent/models.json`) — the actual cause
   of the original 400s.
 
-**Phase 2 — Iteration via compile-to-chain (NEXT; the v1.0 identity).**
-- **Spike first (half-day):** confirm pi-subagents' `chain` `expand` step
-  reads a prior structured output, fans out N tasks with `{item.x}`
-  substitution, and that the runtime `tools` per-task override works
-  end-to-end. If yes → compile target; if no → fall back to bounded *agents*
-  (`dev-bounded.md`) instead of per-step `tools=`.
+**Phase 2 — Iteration via compile-to-chain (DONE; the v1.0 identity).**
+- **Spike confirmed live against a real repo (`~/src/cards`):** pi-subagents'
+  `chain` with `expand`/`parallel`/`collect` reads a prior structured output,
+  fans out N tasks with `{item.x}` substitution, and executes end-to-end.
+  **The runtime `tools` per-task override does NOT exist** —
+  `DynamicParallelTemplateSchema` and `ChainItem` both have
+  `additionalProperties: false` and neither declares a `tools` field, so any
+  compiled step carrying `tools` is rejected by the tool call schema before
+  the chain even starts. Resolved per the pre-planned fallback: bounded
+  *agents* (agent-level `tools:` frontmatter) are the only real enforcement
+  lever; the compiler parses `tools=` for validation/display but never emits
+  it into the compiled chain.
 - `coordinator` profile (`agents/coordinator.md`) — opt-in, judgment only.
 - `iterate=<name>` step kind: parse + render. `{unit}` / `{unit.*}`
   substitution (single braces, matching `{item.x}`).
 - **Compiler:** translate an iterate step to a pi-subagents chain with an
   `expand` step, reusing their fanout/collect/concurrency. Write far less
-  orchestration code than a from-scratch dispatcher.
-- Per-step `tools=` override (general, not iteration-only): agent's tools
-  minus exploration tools (`ls`/`find`/`grep`) by default; `bash` opt-in.
-- `iterate=glob:<pattern>` shorthand for mechanical enumeration (no agent).
+  orchestration code than a from-scratch dispatcher. Two runtime constraints
+  discovered live and now handled by the compiler:
+  - Dynamic-parallel steps require a `collect: { as }` block or the runtime's
+    `isDynamicParallelStep` type guard misclassifies the step as sequential
+    (`Unknown agent: undefined`). The compiler always emits `collect`.
+  - `as`/`collect.as` names must match `/^[A-Za-z_][A-Za-z0-9_]*$/` (no
+    hyphens). Auto-derived names (from `<stem>.json` output filenames) are
+    slugified to underscores.
+- **Agent `tools:` allowlist gotcha (found live):** `--tools` allowlists
+  built-in, extension, *and* dynamically-registered tools. `structured_output`
+  is registered per-step by pi-subagents' runtime (only when `outputSchema` is
+  present), not a built-in — so any agent with an explicit `tools:` list that
+  omits `structured_output` silently fails every `outputSchema` step with
+  "Missing structured_output call", even though the model behaved correctly.
+  All 5 shipped agents (`dev`, `util`, `research`, `high`, `coordinator`) now
+  include `structured_output` in their `tools:` line; `test/agents.test.ts`
+  guards the invariant.
+- `iterate=glob:<pattern>` shorthand for mechanical enumeration (no agent) —
+  **not yet implemented**, carried to a follow-up.
 - `<name>.json` as the inter-step iterable contract (not a bare `units.json`).
-- **Deprecate `maxTools`** (no-op hint for one release, then remove).
-- Structural validation at load time: `iterate=` references resolve;
-  `{unit.field}` fields exist in the producing step's schema.
-- Proof-of-concept: `summarize-files` recipe validated against a real repo —
-  audit shows N small dispatches vs one bloated one.
+- **Deprecate `maxTools`** (no-op hint for one release, then remove) —
+  **not yet removed**, carried to a follow-up.
+- Structural validation at load time (`iterate=` references resolve;
+  `{unit.field}` fields exist in the producing step's schema) — **not yet
+  implemented**, folded into Phase 3's overview TUI validation pass instead.
+- Proof-of-concept: `summarize-files`-shaped chain validated against a real
+  repo (`~/src/cards`, Go codebase) — enumerate step wrote 3 files via
+  `structured_output`, 3 parallel `dev` slots each read one file and wrote a
+  correct, distinct summary. N small dispatches, not one bloated one.
 - Reduce steps read `summary-*.md` / `findings-*.md` (existing `reads=`
   glob already handles this).
 
@@ -120,14 +146,18 @@ audit are done; the next big lever is the iteration runtime.**
    call (infer mode/effort → built-in template) as a fallback, or require
    every invocation to name a recipe? Lean: keep it; it's the "I don't have
    a recipe for this" escape hatch.
-5. **`tools=` per-step override — resolved as general, not iteration-only.**
-   Any step can declare `tools=`; default is the agent's tools minus
-   exploration tools (`ls`/`find`/`grep`), `bash` opt-in. (Was open Q5;
-   settled by review.) **Still open:** whether pi-subagents' `expand` step
-   honors a per-task `tools` override end-to-end — the runtime allowlist
-   (`RUNNER_DYNAMIC_PARALLEL_KEYS`) includes `tools` but the schema I read
-   didn't. The Phase 2 spike answers this; if it doesn't, fall back to
-   bounded *agents* (`dev-bounded.md`) rather than per-step `tools=`.
+5. **`tools=` per-step override — resolved: agent-level only, confirmed live.**
+   The Phase 2 spike (real subagent run against `~/src/cards`) confirmed
+   pi-subagents' tool call schema has no per-task `tools` field at all —
+   `ChainItem` and `DynamicParallelTemplateSchema` both set
+   `additionalProperties: false` and declare no `tools` key, so a compiled
+   step carrying `tools` is rejected outright before the chain runs. The
+   recipe grammar still accepts `tools=<list>` (parsed onto `PlanStep.tools`
+   for validation/display), but `compileRecipeToChain` never emits it.
+   Real tool bounding is agent-level only: pick an agent (or add a bounded
+   variant, e.g. `dev-bounded.md`) whose own `tools:` frontmatter matches
+   what the step needs. (Was open Q5; settled by the Phase 2 spike, not by
+   review as originally guessed.)
 6. **Trivial-iterable enumeration — resolved.** `iterate=glob:<pattern>`
    globs mechanically (no agent); judgment enumeration uses an agent
    (`high` or `coordinator`) that writes `<name>.json`. The coordinator is
