@@ -8,8 +8,13 @@
 
 pi-pipeline is for **building pipelines that iterate over iterable things —
 files, projects, bugs, images, ideas — with one focused subagent per unit,
-small context by construction, and prompts authored by a coordinator agent
-when judgment is needed, not the parent LLM.**
+small context by construction.** The whole loop (define → discover →
+preview → run → watch → share) needs no TypeScript beyond the dispatcher
+itself: a pipeline is a markdown recipe. The runtime enforces small
+per-unit context *by structure* — bounded agents that can't explore — rather
+than by asking the model to self-limit. The pipeline tool executes the plan
+itself (no parent-LLM orchestration), so there's no paraphrase drift to
+defend against.
 
 The whole loop (define → discover → preview → run → watch → share) needs no
 TypeScript: a pipeline is a markdown recipe. The runtime enforces small
@@ -146,34 +151,79 @@ list the enumerate step produced. This is what makes a pipeline work for
 ideation (generate N → research each → sketch 2-3 → review all → iterate)
 as naturally as for files (summarize each file → merge).
 
-## Implementation strategy: compile, don't build
+## Implementation strategy: own the dispatcher
 
-**pi-subagents already has most of the enumerate→map mechanism.** Its
-`chain` mode supports a dynamic-fanout step:
+**The pipeline tool executes plans itself.** When a named recipe runs (not
+a dry-run), the tool's `execute` method:
 
-```
-{ expand: { from: { output, path }, item, key, maxItems, onEmpty },
-  parallel: { agent, task: "template with {item}, {item.path}, ...", ... },
-  collect: { as } }
-```
+1. Resolves the plan from the recipe
+2. Creates a run workspace (`.pi/run/<run_id>/targets/`, `collections/`,
+   `logs/`, `temp/`) and a manifest shell
+3. For each step, spawns a child `AgentSession` via pi's first-party SDK
+   (`createAgentSession` from `@earendil-works/pi-coding-agent`), prompting
+   it with the composed task text (workspace paths resolved, temp dir
+   injected, reads/outputs from the new `output=summary` / `reads=summary`
+   target grammar)
+4. For iterate steps, reads the prior step's `targets/<name>.json` unit
+   list and dispatches N child sessions in parallel with a concurrency cap
+   (default 4)
+5. Updates the manifest inline with each step's real `completed` /
+   `failed` / `partial` status and usage extracted from the session
+6. Finalizes the manifest with `deriveRunStatus` (any failed → `failed`;
+   any partial → `partial`; all completed → `completed`)
+7. Returns a summary with the cost rollup
 
-This reads a prior step's structured JSON output at a JSON Pointer path,
-materializes N parallel subagent tasks with template substitution
-(`{item}` / `{item.path}` / `{task}` / `{previous}` / `{chain_dir}` /
-`{outputs.name}`), and supports per-task overrides (`model`, `reads`,
-`output`, and a runtime `tools` allowlist). This is *nearly exactly* the
-enumerate→map model — which is why the per-unit placeholder syntax in
-SPEC.md uses single braces (`{unit.path}`) to match pi-subagents'
-`{item.path}` convention, minimizing the translation cost.
+The parent LLM does **not** orchestrate subagent dispatch. There is no
+"MUST immediately call the subagent tool with this chain" instruction;
+there is no risk of the parent paraphrasing or dropping the task. The
+pipeline runs deterministically inside the tool's `execute`.
 
-**Implication:** Phase 2 is framed as a **recipe → chain compiler**, not a
-new dispatcher. We translate an `iterate=` step into a pi-subagents chain
-with an `expand` step and reuse their fanout/collect/concurrency machinery
-(concurrency caps, structured-output validation, per-task overrides come for
-free). A half-day spike confirms the `tools` per-task override is usable
-end-to-end before we commit; if it isn't, we fall back to bounded *agents*
-(`dev-bounded.md`) rather than per-step `tools=`. Either way we write far
-less orchestration code than a from-scratch dispatcher.
+### Why own the dispatcher (not pi-subagents)
+
+The 0.5.0 plan assumed `@tintinweb/pi-subagents` would provide a chain
+runtime (`expand`/`collect`/`{outputs.*}`) and we'd compile onto it.
+Review against the published package (0.12.0 installed, 0.13.0 latest)
+found:
+
+- The chain API does not exist in any published release
+- The tool was silently renamed `subagent` → `Agent`, leaving every
+  `event.toolName === "subagent"` hook in the extension dead
+- No local fork was recoverable
+
+`@tintinweb/pi-subagents` is a thin wrapper over pi's first-party SDK — the
+same package we already declare as a peerDependency. Owning the dispatcher
+depends on the SDK directly, eliminating the third-party extension as a
+variable. See [ARTIFACTS.md](ARTIFACTS.md) §Relationship to pi-subagents
+runtime for the full rationale.
+
+### The runtime contract
+
+Each step gets:
+- A `cwd` (the project root, so the agent sees the real repo)
+- A bounded `tools:` allowlist from the agent profile (e.g. `read, write,
+  edit, bash, structured_output`)
+- A `systemPrompt` from the agent's markdown body (with `replace` or
+  `append` mode)
+- A `model` resolved from the agent profile → tier defaults (from
+  `subagents.agentOverrides` in settings.json) → registry default
+- A `sessionManager.inMemory(cwd)` (no on-disk session persistence for
+  pipeline steps; full sessions are recorded via the existing subagent
+  session JSONL path if the agent has `persist_session: true`)
+- A `resourceLoader` (`DefaultResourceLoader` with `noPromptTemplates`,
+  `noThemes`, `noContextFiles`; system prompt overridden) so built-in tools,
+  skills, and extensions are properly loaded — a hand-rolled stub silently
+  broke `structured_output` registration during development
+
+The agent runs to completion, we extract `usage` and the final `text` from
+`session.messages`, and `session.dispose()` to free resources. Per-unit
+isolation in iterate steps comes from the worker pool (`Promise.all` over a
+bounded number of in-flight dispatches); per-unit errors are caught and
+recorded in the manifest as `failed` with the error string.
+
+The coordinator profile and the per-unit prompt template are no longer
+needed. The parent LLM no longer rewrites per-unit tasks, so there's no
+paraphrase drift to defend against. Recipes carry the full task text as
+prose; the dispatcher injects paths and dispatches verbatim.
 
 ## Profiles
 
@@ -201,12 +251,14 @@ A **profile** is a named agent. The package ships five:
   becomes `1 util + 2 dev + 3 research + 1 high` — more honest. Real costs
   are shown in the overview/dashboard per model.
 
-### Migration from the current `tier`/`costClass`
+### Profiles → agents
 
-`PlanStep.tier` and `PlanStep.costClass` → just `agent: string`. This touches
-`renderPlan`, `summarizeCost`, the tool `details`, and `renderCostReport` —
-all straightforward edits in `lib.ts`. Done in the same phase as the recipe
-loader so recipes never produce the old fields. *(Done in Phase 1.)*
+Recipes reference agents by name. Any agent (built-in or custom) can be
+referenced; the dispatcher loads the named profile from `agents/<name>.md`
+at run time. The agent frontmatter (`tools:`, `thinking:`,
+`systemPromptMode:`, `model:`, `maxTurns:`) is the contract. The user binds
+profiles to models via `subagents.agentOverrides` in
+`~/.pi/agent/settings.json` (existing mechanism — no new config concept).
 
 ## What stays TS
 

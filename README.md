@@ -7,6 +7,7 @@ For detailed design, grammar, and next steps, see the documentation in `docs/`:
 - [Specification / Recipe Format](docs/SPEC.md) — The normative spec for writing pipeline markdown files, header syntax, variables, and resolution rules.
 - [Project Roadmap (PLAN)](docs/PLAN.md) — Status, implementation stages (Phases 1–6), resolved questions, and open challenges.
 - [Worked Examples](docs/EXAMPLES.md) — Real-world pipeline recipes like `code-quality` and `verify-source` with walk-throughs.
+- [Artifacts](docs/ARTIFACTS.md) — How steps name, store, and hand off outputs: the directory model, named outputs, and skill-based delivery.
 - [TUI & Dashboards](docs/TUI.md) — User interface design for list views, pre-run confirmations, and live run dashboards.
 
 ---

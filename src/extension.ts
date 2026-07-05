@@ -49,21 +49,34 @@ import {
 	buildPlan,
 	summarizeCost,
 	renderPlan,
-	loadTierModels,
-	injectTierModels,
 	fallbacksFor,
-	newReport,
-	buildCostStep,
-	renderProgressStatus,
 	renderCostReport,
 	renderAuditReport,
 	renderStepAudit,
-	copyToClipboard,
-	fmtTokens,
 	STATIC_STATUS,
 } from "./lib.ts";
-import { buildPlanFromRecipe, compileRecipeToChain } from "./recipes.ts";
+import { buildPlanFromRecipe, validatePlanTargets } from "./recipes.ts";
 import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs } from "./discovery.ts";
+import {
+	loadAgentProfile,
+	dispatchStep,
+	dispatchIterate,
+	buildManifestStep,
+	recordStepResult,
+	loadUnits,
+	collectCollection,
+} from "./dispatcher.ts";
+import type { StepResult, StepUsage, AgentProfile, IterateUnit } from "./dispatcher.ts";
+import {
+	mintRunId,
+	createWorkspace,
+	writeManifestShell,
+	updateManifestStep,
+	finalizeManifest,
+	cleanupRuns,
+	loadArtifactsConfig,
+} from "./workspace.ts";
+import type { WorkspaceInfo, ManifestStep } from "./workspace.ts";
 
 /* ──────────────────────── discovery helper ────────────────────────
  *
@@ -86,18 +99,16 @@ function discoverAllRecipes() {
 	});
 }
 
-/* ──────────────────────── cost state (session-scoped) ────────────────────────
+/* ──────────────────────── session-scoped state ────────────────────────
  *
- * Per-dispatch subagent cost accumulated from `tool_result` events so
- * `/pipeline-costs` can render a breakdown. Reset on `pipeline` tool call
- * (new op) and on `session_start` (no leak across sessions in one process).
- * Lives here in the wiring module, not the pure lib, because it is mutable. */
+ * Workspace + cost state. The dispatcher populates the manifest inline; cost
+ * rollup is rebuilt from the dispatcher's `StepResult`s (not sniffed from
+ * `subagent` tool events, which were dead code against the installed
+ * runtime). */
 
-let currentReport: PipelineCostReport = { steps: [] };
-let dispatchCounter = 0;
-let lastReport: PipelineCostReport = { steps: [] };
-let currentPlanName: string | undefined;   // recipe name for the active run (undefined = generic path)
-let activeProgressCache: Record<string, string> = {}; // track state transitions of running parallel slots to fire notifications
+let currentWorkspace: WorkspaceInfo | undefined;
+let lastRunSteps: Array<{ step: ManifestStep; result: StepResult }> = [];
+let currentArtifactsConfig = loadArtifactsConfig();
 
 /* ──────────────────────── plan resolution ────────────────────────
  *
@@ -121,15 +132,18 @@ function resolvePlan(input: PipelineParams & { pipeline?: string; inputs?: Recor
 				error: `No pipeline recipe named "${input.pipeline}" was found. Available: ${recipes.map((r) => r.name).join(", ") || "(none)"}. Falling back to the generic pipeline.`,
 			};
 		}
+		const plan = buildPlanFromRecipe({
+			raw: recipe.raw,
+			nameFallback: recipe.name,
+			inputs: input.inputs,
+			hints: input.hints,
+		});
+		const validation = validatePlanTargets(plan);
 		return {
-				plan: buildPlanFromRecipe({
-					raw: recipe.raw,
-					nameFallback: recipe.name,
-					inputs: input.inputs,
-					hints: input.hints,
-				}),
-				name: recipe.name,
-			};
+			plan,
+			name: recipe.name,
+			error: validation.length > 0 ? validation.join("; ") : undefined,
+		};
 	}
 	return { plan: buildPlan(input) }; // generic inference path
 }
@@ -137,112 +151,120 @@ function resolvePlan(input: PipelineParams & { pipeline?: string; inputs?: Recor
 
 /* ──────────────────────── tool & command ──────────────────────── */
 
+/* ──────────────────────── helpers ──────────────────────── */
+
+function emptyUsage(): StepUsage {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+}
+
+function lastRunReport(): PipelineCostReport {
+	if (lastRunSteps.length === 0) {
+		return { steps: [] };
+	}
+	// Use a minimal plan-shaped object; only step count is used downstream.
+	const fakePlan: Plan = {
+		effort: "standard",
+		mode: "research",
+		summary: "",
+		steps: lastRunSteps.map((s) => ({
+			phase: s.step.phase,
+			agent: s.step.agent,
+			label: s.step.phase,
+			task: s.step.phase,
+		} as any)),
+	};
+	return buildCostReport(fakePlan, undefined, lastRunSteps, false);
+}
+
+function buildCostReport(
+	plan: Plan,
+	name: string | undefined,
+	steps: Array<{ step: ManifestStep; result: StepResult }>,
+	dryRun: boolean,
+): PipelineCostReport {
+	const stepEntries = steps.map(({ step, result }, i) => ({
+		stepIndex: i + 1,
+		mode: result.units ? "parallel" : "single",
+		agent: step.agent,
+		task: step.phase,
+		results: [{
+			agent: step.agent,
+			model: "(dispatcher)",
+			task: step.phase,
+			exitCode: result.status === "completed" ? 0 : 1,
+			error: result.error,
+			usage: {
+				input: result.usage.input,
+				output: result.usage.output,
+				cacheRead: result.usage.cacheRead,
+				cacheWrite: result.usage.cacheWrite,
+				cost: result.usage.cost,
+				turns: result.usage.turns,
+			},
+			durationMs: result.durationMs,
+			toolCount: 0,
+			finalOutput: result.text,
+			attempts: [],
+		}],
+	}));
+	return {
+		planName: name,
+		planMode: plan.mode,
+		planEffort: plan.effort,
+		planStepCount: plan.steps.length,
+		planCostShape: summarizeCost(plan),
+		dryRun,
+		steps: stepEntries,
+	};
+}
+
+function pipelineDetails(plan: Plan, name: string | undefined, dryRun: boolean) {
+	return {
+		pipeline: name,
+		mode: plan.mode,
+		effort: plan.effort,
+		stepCount: plan.steps.length,
+		agents: plan.steps.reduce(
+			(acc, s) => { acc[s.agent] = (acc[s.agent] ?? 0) + 1; return acc; },
+			{} as Record<string, number>,
+		),
+		costShape: summarizeCost(plan),
+		dryRun,
+	};
+}
+
 export default function (pi: ExtensionAPI) {
-	// 1. Persistent status indicator (visible at the top of every turn).
-	pi.on("session_start", (_event, ctx) => {
-		// No leak across sessions in a long-lived process: reset cost state.
-		currentReport = { steps: [] };
-		dispatchCounter = 0;
-		lastReport = { steps: [] };
-		if (ctx.ui.theme) {
-			ctx.ui.setStatus("pipeline", ctx.ui.theme.fg("dim", STATIC_STATUS));
-		}
-		ctx.ui.notify(
-			"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-costs — cost breakdown of the last run.\n/pipeline-audit — per-step audit (tasks/errors/tool-calls/artifacts).\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
-			"info",
-		);
-	});
+	// 1. Persistent status indicator + session reset.
+pi.on("session_start", (_event, ctx) => {
+	lastRunSteps = [];
+	currentWorkspace = undefined;
+	if (ctx.ui.theme) {
+		ctx.ui.setStatus("pipeline", ctx.ui.theme.fg("dim", STATIC_STATUS));
+	}
+	ctx.ui.notify(
+		"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-costs — cost breakdown of the last run.\n/pipeline-audit — per-step audit (tasks/errors/tool-calls/artifacts).\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
+		"info",
+	);
+});
 
-	// 1b. Model fallback: inject OpenRouter's native `models` array so the
-	// server falls through on rate-limits/downtime (see DEFAULT_MODEL_FALLBACKS).
-	pi.on("before_provider_request", (event) => {
-		const payload = event.payload as Record<string, unknown> | undefined;
-		if (!payload || typeof payload !== "object") return;
-		const model = payload["model"];
-		if (typeof model !== "string") return;
-		// Only inject when a fallback chain is known for this primary. If the
-		// caller already set `models` (e.g. a manual override), leave it alone.
-		const chain = fallbacksFor(model);
-		if (!chain || chain.length === 0) return;
-		if (Array.isArray(payload["models"]) && payload["models"].length > 0) return;
-		return { ...payload, models: chain };
-	});
+// 1b. Model fallback: inject OpenRouter's native `models` array so the
+// server falls through on rate-limits/downtime (see DEFAULT_MODEL_FALLBACKS).
+pi.on("before_provider_request", (event) => {
+	const payload = event.payload as Record<string, unknown> | undefined;
+	if (!payload || typeof payload !== "object") return;
+	const model = payload["model"];
+	if (typeof model !== "string") return;
+	const chain = fallbacksFor(model);
+	if (!chain || chain.length === 0) return;
+	if (Array.isArray(payload["models"]) && payload["models"].length > 0) return;
+	return { ...payload, models: chain };
+});
 
-	// 1c. Pin tier models + reset cost tracking + live progress status.
-	//
-	// On every `pipeline` tool call we reset the cost report (a new pipeline
-	// operation is starting) and remember the plan metadata. On every
-	// `subagent` tool call we inject the configured tier model for the
-	// util/research/high agents (so the right model is used even if the
-	// parent process hasn't reloaded agentOverrides — see loadTierModels),
-	// bump the dispatch counter, and seed the status line.
-	pi.on("tool_call", (event: any, _ctx: any) => {
-		if (event.toolName === "pipeline") {
-			const input = event.input ?? {};
-			const resolved = resolvePlan(input as PipelineParams & { pipeline?: string });
-			currentReport = newReport(resolved.plan, input.dryRun === true, resolved.name);
-			currentPlanName = resolved.name;
-			dispatchCounter = 0;
-			return;
-		}
-		if (event.toolName !== "subagent") return;
-		const input = (event.input ?? {}) as Record<string, any>;
-		// Inject the configured tier model for util/research/high when the caller
-		// didn't set one (defends against stale agentOverrides — see lib.ts).
-		injectTierModels(input, loadTierModels());
-	});
+// The dead `subagent`/`Agent` event hooks are removed. The pipeline tool
+// now owns dispatch (see Stage D); usage comes from the dispatcher, not
+// from event sniffing. Status reporting happens inline in `execute`.
 
-	// 1d. Live progress: reflect the subagent's current task/tool/path/tokens
-	// in the status line as it works. `tool_execution_update` carries the
-	// partial result the subagent tool emits via onUpdate.
-	pi.on("tool_execution_update", (event: any, ctx: any) => {
-		if (event.toolName !== "subagent") return;
-		const pr = event.partialResult as { details?: any } | undefined;
-		const progress = pr?.details?.progress;
-		if (!Array.isArray(progress)) return;
-		const line = renderProgressStatus(progress);
-		if (ctx?.ui?.setStatus) ctx.ui.setStatus("pipeline", line);
-
-		// Non-blocking popup notifications on status transitions (running/completed/failed)
-		for (const p of progress) {
-			if (!p) continue;
-			const key = `${p.agent}_${p.index}`;
-			const prevStatus = activeProgressCache[key];
-			const currentStatus = p.status ?? "running";
-			if (prevStatus !== currentStatus) {
-				activeProgressCache[key] = currentStatus;
-				if (currentStatus === "completed" || currentStatus === "failed") {
-					const marker = currentStatus === "completed" ? "✓" : "✗";
-					const detail = `Slot #${p.index + 1} (${p.agent}) ${currentStatus} ${marker} (${fmtTokens(p.tokens)} tokens, ${p.toolCount} tools)`;
-					if (ctx?.ui?.notify) ctx.ui.notify(`[pipeline] ${detail}`, currentStatus === "completed" ? "info" : "error");
-				} else if (currentStatus === "running") {
-					if (ctx?.ui?.notify) ctx.ui.notify(`[pipeline] Slot #${p.index + 1} (${p.agent}) started running...`, "info");
-				}
-			}
-		}
-	});
-
-	// 1e. Restore the static status line when a subagent dispatch finishes.
-	pi.on("tool_execution_end", (event: any, ctx: any) => {
-		if (event.toolName !== "subagent") return;
-		activeProgressCache = {}; // Flush cache for next step
-		if (ctx?.ui?.setStatus) ctx.ui.setStatus("pipeline", STATIC_STATUS);
-	});
-
-	// 1f. Accumulate per-step + per-model cost from subagent tool results.
-	pi.on("tool_result", (event: any, _ctx: any) => {
-		if (event.toolName !== "subagent") return;
-		const details = event.details as { mode?: string; results?: any[] } | undefined;
-		if (!details || details.mode === "management") return;
-		const input = (event.input ?? {}) as Record<string, any>;
-		const step = buildCostStep(input, details, ++dispatchCounter);
-		if (!step) return;
-		currentReport.steps.push(step);
-		// Snapshot so the command can read a stable copy even mid-run.
-		lastReport = currentReport;
-	});
-
-	// 2. The `pipeline` tool — the LLM-facing surface.
+// 2. The `pipeline` tool — the LLM-facing surface.
 	pi.registerTool({
 		name: "pipeline",
 		label: "Pipeline",
@@ -254,9 +276,11 @@ export default function (pi: ExtensionAPI) {
 					description: "Name of a pipeline recipe to run (e.g. 'code-quality', 'verify-source'). Omit to infer a generic pipeline from the task.",
 				}),
 			),
-			task: Type.String({
-				description: "The task to perform, in plain language. For a named recipe, this provides the specifics the recipe's {{placeholders}} fill.",
-			}),
+			task: Type.Optional(
+				Type.String({
+					description: "The task to perform, in plain language. For a named recipe, the recipe's {{placeholders}} are filled from `inputs`; `task` is only needed for generic (unnamed) pipelines. Defaults to the recipe name when omitted.",
+				}),
+			),
 			inputs: Type.Optional(
 				Type.Record(Type.String(), Type.String(), {
 					description: "Named inputs for a recipe's {{placeholders}} (e.g. { scope: 'frontend code' }). Optional — placeholders can also be inferred from the task.",
@@ -288,55 +312,172 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string> };
 			const resolved = resolvePlan(p);
 			const plan = resolved.plan;
-			let text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, p.task, p.dryRun ?? false);
+			const effectiveTask = p.task ?? (resolved.name ?? "(unnamed)");
+			let text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, effectiveTask, p.dryRun ?? false);
 
-			// Compile to dynamic subagent chain if executing a named recipe (not in dryRun).
-			// This tells the parent LLM to immediately delegate the whole pipeline natively,
-			// bypassing manual orchestration and ensuring 100% determinism.
-			let compiledChain: any[] | undefined;
-			if (!p.dryRun && resolved.name) {
+			// Reset per-op run state
+			lastRunSteps = [];
+
+			// Dry run: return the plan only, no execution, no workspace
+			if (p.dryRun || !resolved.name) {
+				return {
+					content: [{ type: "text" as const, text }],
+					details: pipelineDetails(plan, resolved.name, p.dryRun ?? false),
+				};
+			}
+
+			// Named, non-dryRun recipe: create workspace, dispatch each step, finalize.
+			const projectDir = ctx.cwd || process.cwd();
+			cleanupRuns(projectDir, currentArtifactsConfig);
+			currentWorkspace = createWorkspace(projectDir, resolved.name, currentArtifactsConfig);
+			writeManifestShell(currentWorkspace, resolved.name, projectDir);
+
+			// Pre-populate manifest with pending step shells (so /pipeline-audit
+			// shows structure even before the first dispatch lands).
+			const manifestStepIds: string[] = [];
+			for (const step of plan.steps) {
+				const ms = buildManifestStep(step, currentWorkspace);
+				manifestStepIds.push(ms.id);
+				// Re-use the dispatcher helper for the initial write
+				// (it calls updateManifestStep, which overwrites by id).
+				updateManifestStep(currentWorkspace, ms);
+			}
+
+			// Set up the dispatch context. The SDK is dynamically imported to
+			// keep this module importable in test contexts where the SDK is
+			// not resolvable.
+			let authStorage: any, modelRegistry: any;
+			try {
+				const sdk = await import("@earendil-works/pi-coding-agent");
+				authStorage = (sdk as any).AuthStorage.create();
+				modelRegistry = (sdk as any).ModelRegistry.create(authStorage);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				text += `\n\n**Error:** Failed to load pi SDK: ${msg}\n`;
+				return { content: [{ type: "text" as const, text }], details: pipelineDetails(plan, resolved.name, false) };
+			}
+
+			const agentsDir = path.resolve(projectDir, "agents");
+
+			// Helper: build a cost-tracker-compatible step entry from a result
+			const stepEntry = (stepId: string, phase: string, agent: string, task: string, result: StepResult) => {
+				const e: any = {
+					stepIndex: lastRunSteps.length + 1,
+					mode: stepId === phase ? "single" : "single",
+					agent,
+					task: task.slice(0, 80),
+					results: [{
+						agent,
+						model: "(dispatcher)",
+						task,
+						exitCode: result.status === "completed" ? 0 : 1,
+						error: result.error,
+						usage: {
+							input: result.usage.input,
+							output: result.usage.output,
+							cacheRead: result.usage.cacheRead,
+							cacheWrite: result.usage.cacheWrite,
+							cost: result.usage.cost,
+							turns: result.usage.turns,
+						},
+						durationMs: result.durationMs,
+						toolCount: 0,
+						finalOutput: result.text,
+						attempts: [],
+					}],
+				};
+				return e;
+			};
+
+			// Dispatch each step in order. Iterate steps read their unit list
+			// from the prior step's output; reduce steps read the collection.
+			for (let i = 0; i < plan.steps.length; i++) {
+				const step = plan.steps[i]!;
+				const stepId = manifestStepIds[i]!;
+
+				// Update status to running
+				const runningMs = buildManifestStep(step, currentWorkspace);
+				runningMs.status = "running";
+				updateManifestStep(currentWorkspace, runningMs);
+				if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", `Step ${i + 1}/${plan.steps.length}: ${step.phase} (${step.agent})…`);
+
+				// Load the agent profile for this step's tier
+				const loaded = loadAgentProfile(step.agent, agentsDir);
+				if (!loaded) {
+					const err = `Agent profile not found: ${step.agent} (looking in ${agentsDir})`;
+					const failed: StepResult = {
+						status: "failed",
+						text: "",
+						error: err,
+						usage: emptyUsage(),
+						durationMs: 0,
+					};
+					recordStepResult(currentWorkspace, stepId, failed, step.outputs?.[0]?.name);
+					lastRunSteps.push({ step: runningMs, result: failed });
+					text += `\n\n**Error:** ${err}\n`;
+					break; // abort the run
+				}
+
+				// For iterate steps, load the unit list
+				let units: IterateUnit[] | undefined;
+				if (step.iterate) {
+					units = loadUnits(currentWorkspace, step.iterate, projectDir);
+					if (units.length === 0) {
+						const err = `Iterate step "${step.phase}" references "${step.iterate}" but no unit list was found.`;
+						const failed: StepResult = { status: "failed", text: "", error: err, usage: emptyUsage(), durationMs: 0 };
+						recordStepResult(currentWorkspace, stepId, failed, step.outputs?.[0]?.name);
+						lastRunSteps.push({ step: runningMs, result: failed });
+						text += `\n\n**Error:** ${err}\n`;
+						break;
+					}
+				}
+
+				// Dispatch (single or iterate)
+				let result: StepResult;
 				try {
-					compiledChain = compileRecipeToChain(plan);
-					const chainJson = JSON.stringify({ chain: compiledChain }, null, 2);
-					text += "\n\n" +
-						"### Compiled Execution Chain\n" +
-						"To execute this plan automatically with small bounded unit contexts and proper map-reduce parallel slot execution, **you MUST immediately call the `subagent` tool with this exact compiled `chain` argument.** Do not paraphrase, omit, or restructure this chain — invoke the subagent tool now:\n\n" +
-						"```json\n" +
-						chainJson + "\n" +
-						"```\n";
+					const opts = {
+						projectDir,
+						agentsDir,
+						modelRegistry,
+						authStorage,
+						abortSignal: signal,
+						onProgress: onUpdate ? (txt: string) => onUpdate({ content: [{ type: "text" as const, text: txt }] }) : undefined,
+					};
+					result = units
+						? await dispatchIterate(step, currentWorkspace, loaded.profile, units, opts)
+						: await dispatchStep(step, currentWorkspace, loaded.profile, opts);
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
-					text += `\n\n**Warning (compiler):** Failed to compile recipe to chain: ${msg}. Falling back to manual step-by-step delegation.\n`;
+					result = { status: "failed", text: "", error: msg, usage: emptyUsage(), durationMs: 0 };
+				}
+
+				// Update manifest with the real result
+				recordStepResult(currentWorkspace, stepId, result, step.outputs?.[0]?.name);
+				lastRunSteps.push({ step: runningMs, result });
+
+				// Stop the run on first failure (mirrors the old "subsequent steps blocked" behavior)
+				if (result.status === "failed") {
+					text += `\n\n**Step ${i + 1} failed:** ${result.error ?? "unknown error"}\n`;
+					break;
 				}
 			}
 
+			// Finalize the manifest (derives overall status from step statuses)
+			try { finalizeManifest(currentWorkspace); } catch { /* best effort */ }
+			if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", STATIC_STATUS);
+
+			// Build a cost report from the dispatched steps
+			const costReport = buildCostReport(plan, resolved.name, lastRunSteps, false);
+			text += "\n\n### Execution summary\n";
+			text += renderCostReport(costReport).lines.join("\n");
+
 			return {
-				content: [
-					{
-						type: "text" as const,
-						text,
-					},
-				],
-				details: {
-					pipeline: resolved.name,
-					mode: plan.mode,
-					effort: plan.effort,
-					stepCount: plan.steps.length,
-					agents: plan.steps.reduce(
-						(acc, s) => {
-							acc[s.agent] = (acc[s.agent] ?? 0) + 1;
-							return acc;
-						},
-						{} as Record<string, number>,
-					),
-					costShape: summarizeCost(plan),
-					dryRun: p.dryRun ?? false,
-					chain: compiledChain,
-				},
+				content: [{ type: "text" as const, text }],
+				details: pipelineDetails(plan, resolved.name, false),
 			};
 		},
 	});
@@ -390,7 +531,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Show a cost breakdown of the last pipeline operation by step and model (tokens/cost per model and per pipeline step).",
 		handler: async (_args, ctx) => {
-			const report = lastReport.steps.length > 0 ? lastReport : currentReport;
+			const report = lastRunReport();
 			const { title, lines } = renderCostReport(report);
 			if (ctx?.ui?.select) {
 				await ctx.ui.select(title, lines);
@@ -408,7 +549,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Audit the last pipeline run: per-step task/model/errors/tool-calls/artifacts. Surfaces context-overflow failures.",
 		handler: async (_args, ctx) => {
-			const report = lastReport.steps.length > 0 ? lastReport : currentReport;
+			const report = lastRunReport();
 			if (report.steps.length === 0) {
 				ctx.ui.notify("No pipeline operation recorded yet.", "warn");
 				return;
