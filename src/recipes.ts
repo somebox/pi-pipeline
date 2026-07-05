@@ -17,6 +17,8 @@
  */
 
 import { type Plan, type PlanStep, composeStepTask } from "./lib.ts";
+import type { WorkspaceInfo } from "./workspace.ts";
+import path from "node:path";
 
 /** Parsed recipe frontmatter. All fields optional. */
 export interface RecipeFrontmatter {
@@ -83,6 +85,99 @@ export function parseFrontmatter(raw: string): { frontmatter: RecipeFrontmatter;
 
 function stripQuotes(s: string): string {
 	return s.replace(/^["'](.*)["']$/, "$1");
+}
+
+export interface TargetSpec {
+  /** Target identifier, used in reads= references and the manifest. */
+  name: string;
+  /** Where the target lives. */
+  scheme: "work" | "temp" | "project" | "legacy";
+  /** Singleton = one file; collection = one per fan-out unit. */
+  kind: "singleton" | "collection";
+  /** File extension (md, json, etc.). */
+  ext: string;
+  /** For scheme=temp/project/legacy: the raw path literal from the recipe. */
+  rawPath?: string;
+  /** For collections: the unit placeholder pattern (e.g. "{unit.path}"). */
+  unitPattern?: string;
+}
+
+/** Determine whether an output token is a legacy literal path (contains . or /
+ *  after stripping {…} placeholders) or a new target name. */
+export function isLegacyOutput(token: string): boolean {
+  // Strip all {…} placeholder expressions.
+  const stripped = token.replace(/\{[^{}]*\}/g, "");
+  // If there is an explicit scheme prefix it is never legacy.
+  if (/^(?:temp|project|work):/.test(token)) return false;
+  // If there is an explicit scheme assignment (name=scheme:...) it is never legacy.
+  if (/^[A-Za-z_][A-Za-z0-9_-]*=(?:temp|project|work):/.test(token)) return false;
+  // If the stripped text contains a dot or slash it is a filesystem path.
+  return /[./]/.test(stripped);
+}
+
+/** Parse an `output=` token into a structured target spec. Returns `null` for
+ *  legacy literals so the caller keeps the raw string in `PlanStep.output`. */
+export function parseOutputSpec(token: string): TargetSpec | null {
+  if (isLegacyOutput(token)) return null;
+
+  // Explicit scheme form: name=scheme:path
+  const explicitScheme = token.match(/^([A-Za-z_][A-Za-z0-9_-]*)=(temp|project|work):(.+)$/);
+  if (explicitScheme) {
+    const name = explicitScheme[1];
+    const scheme = explicitScheme[2] as TargetSpec["scheme"];
+    const rawPath = explicitScheme[3];
+    const ext = rawPath.includes(".") ? rawPath.split(".").pop()! : "md";
+    return { name, scheme, kind: "singleton", ext, rawPath };
+  }
+
+  // JSON shorthand: name:json
+  const jsonForm = token.match(/^([A-Za-z_][A-Za-z0-9_-]*):json$/);
+  if (jsonForm) {
+    return { name: jsonForm[1], scheme: "work", kind: "singleton", ext: "json" };
+  }
+
+  // Collection form: name-{unit.XXX}
+  const collForm = token.match(/^([A-Za-z_][A-Za-z0-9_-]*)-\{(unit(?:\.[A-Za-z0-9_-]+)?)\}$/);
+  if (collForm) {
+    return { name: collForm[1], scheme: "work", kind: "collection", ext: "md", unitPattern: `{${collForm[2]}}` };
+  }
+
+  // Bare name → work singleton, default ext md
+  if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(token)) {
+    return { name: token, scheme: "work", kind: "singleton", ext: "md" };
+  }
+
+  // Unrecognised but not legacy → treat as work singleton with the literal as ext
+  return { name: token, scheme: "work", kind: "singleton", ext: "md" };
+}
+
+/** Build a set of target names declared by earlier steps, for read validation. */
+export function availableTargets(steps: readonly PlanStep[], upToIndex: number): Set<string> {
+  const set = new Set<string>();
+  for (let i = 0; i < upToIndex; i++) {
+    for (const t of steps[i]?.outputs ?? []) set.add(t.name);
+  }
+  return set;
+}
+
+/** Validate that every read reference resolves to an earlier target or explicit scheme.
+ *  Returns an empty array when valid, otherwise a list of human-readable errors. */
+export function validatePlanTargets(plan: Plan): string[] {
+  const errors: string[] = [];
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    const avail = availableTargets(plan.steps, i);
+    for (const read of step?.reads ?? []) {
+      if (read.startsWith("project:")) continue;
+      if (isLegacyOutput(read)) continue;     // legacy literals are not validated
+      if (!avail.has(read)) {
+        errors.push(
+          `Step "${step.phase}" reads unresolved target "${read}". Available: ${[...avail].join(", ") || "(none)"}.`,
+        );
+      }
+    }
+  }
+  return errors;
 }
 
 /* ───────────────────────── step header ───────────────────────── */
@@ -217,11 +312,18 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 
 	const steps: PlanStep[] = parsedSteps.map(({ header, task }) => {
 		const resolvedTask = substituteInputs(task, input.inputs);
-		const output = header.output ?? inferOutput(resolvedTask);
+		const outputRaw = header.output ?? inferOutput(resolvedTask);
 		// Reads: explicit flag wins; otherwise infer all backticked .md refs and
 		// subtract the output (the file this step writes is not a read).
 		let reads = header.reads.length > 0 ? header.reads : inferReads(resolvedTask);
-		if (output) reads = reads.filter((r) => r !== output);
+		if (outputRaw) reads = reads.filter((r) => r !== outputRaw);
+
+		// Parse output token into structured targets (Stage 2). Legacy literals
+		// stay in `output`; new targets populate `outputs`.
+		const outputs: TargetSpec[] | undefined = outputRaw ? (() => {
+			const spec = parseOutputSpec(outputRaw);
+			return spec ? [spec] : undefined;
+		})() : undefined;
 
 		// Infer iterate from prose: "For each `{unit}` in scope-files..."
 		const iterateMatch = resolvedTask.match(/for each `{unit(?:\.[A-Za-z0-9_-]+)?}` in ([A-Za-z0-9_-]+)/i);
@@ -233,7 +335,8 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 			agent: header.agent,
 			label: header.phase, // label == phase for recipes; renderPlan shows it
 			task: resolvedTask,
-			output,
+			output: outputs ? outputRaw : outputRaw, // keep raw for display
+			outputs,
 			reads: reads.length > 0 ? reads : undefined,
 			parallel: header.parallel ? 1 : undefined,
 			maxTools: header.maxTools,
@@ -279,63 +382,149 @@ export function usedPlaceholders(raw: string): string[] {
 /** Compile a parsed Recipe Plan into a pi-subagents execution chain array.
  *  Translates iterate= steps to expand/parallel blocks, adding outputSchema
  *  for any step writing a .json file so coordinates bind structured outputs natively. */
-export function compileRecipeToChain(plan: Plan): any[] {
+export function slugifyAs(name: string): string {
+	return name.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+function resolveTargetPath(target: TargetSpec, ws: WorkspaceInfo): string {
+	if (target.scheme === "work") {
+		if (target.kind === "collection") {
+			return path.join(ws.collectionsDir, target.name, `${target.name}-{unit.path}.${target.ext}`);
+		}
+		return path.join(ws.targetsDir, `${target.name}.${target.ext}`);
+	}
+	if (target.scheme === "temp") {
+		return path.join(ws.tempRoot, target.rawPath ?? `${target.name}.${target.ext}`);
+	}
+	if (target.scheme === "project") {
+		return path.resolve(target.rawPath ?? target.name);
+	}
+	return target.rawPath ?? target.name;
+}
+
+function resolveReadPath(read: string, _plan: Plan, stepIndex: number, _ws?: WorkspaceInfo): string {
+	if (read.startsWith("project:")) return read.slice(8);
+	// For named target references in a non-workspace compile, pass through as-is.
+	return read;
+}
+
+function injectCollectionRef(task: string, collectionName: string): string {
+	return `Refer to the collected output \`{outputs.${collectionName}}\`.\n\n${task}`;
+}
+
+/** Compile a parsed Recipe Plan into a pi-subagents execution chain array.
+ *  Translates iterate= steps to expand/parallel blocks, adding outputSchema
+ *  for any step writing a .json file so coordinates bind structured outputs natively.
+ *  When a WorkspaceInfo is provided, target-based outputs resolve to absolute
+ *  workspace paths and {outputs.<name>} references are injected for collection
+ *  reads (Stage 2). */
+export function compileRecipeToChain(plan: Plan, _ws?: WorkspaceInfo): any[] {
 	const chain: any[] = [];
-	for (const step of plan.steps) {
+	// Build a lookup of target name → TargetSpec from all steps for read resolution.
+	const allTargets = new Map<string, TargetSpec>();
+	for (const s of plan.steps) {
+		for (const t of s.outputs ?? []) allTargets.set(t.name, t);
+	}
+	for (let stepIndex = 0; stepIndex < plan.steps.length; stepIndex++) {
+		const step = plan.steps[stepIndex];
 		const isIterate = typeof step.iterate === "string" && step.iterate.length > 0;
+
+		// Resolve reads for this step.
+		const resolvedReads: string[] = [];
+		let resolvedTask = step.task;
+
+		// Stage 3: inject temp/scratch directory when workspace is available.
+		if (_ws) {
+			const stepSlug = slugifyAs(step.phase);
+			const tempDir = path.join(_ws.tempRoot, stepSlug);
+			resolvedTask = `Use the scratch directory ${tempDir} for any temporary files you create. ` +
+				`Do not write your main output there; use the output path specified below.\n\n${resolvedTask}`;
+		}
+
+		for (const read of step.reads ?? []) {
+			if (read.startsWith("project:")) {
+				resolvedReads.push(read.slice(8));
+				continue;
+			}
+			if (isLegacyOutput(read)) {
+				resolvedReads.push(read);
+				continue;
+			}
+			const target = allTargets.get(read);
+			if (target && _ws) {
+				if (target.kind === "collection") {
+					resolvedTask = injectCollectionRef(resolvedTask, read);
+				} else {
+					resolvedReads.push(resolveTargetPath(target, _ws));
+				}
+			} else {
+				resolvedReads.push(read); // passthrough when workspace unavailable
+			}
+		}
+
 		if (isIterate) {
 			const sourceName = step.iterate!.replace(/[^A-Za-z0-9_]/g, "_");
 			const itemVar = "unit";
-			// Build the expand block referencing the unit-list source file by as-name
 			const expand = {
-				from: {
-					output: sourceName,
-					path: "/items",
-				},
+				from: { output: sourceName, path: "/items" },
 				item: itemVar,
 				key: "/path",
 				maxItems: 100,
 			};
-			// Build the dynamic parallel template for the loop map slots
 			const parallel: Record<string, any> = {
 				agent: step.agent,
-				task: step.task,
+				task: resolvedTask,
 			};
-			if (step.reads && step.reads.length > 0) {
-				parallel.reads = step.reads;
+			if (resolvedReads.length > 0) {
+				parallel.reads = resolvedReads;
 			}
-			if (step.output) {
-				// Translate placeholder from {unit} syntax to {unit.path} for absolute pathing safely
+			if (step.outputs && step.outputs.length > 0 && _ws) {
+				const t = step.outputs[0];
+				if (t.kind === "collection") {
+					parallel.output = resolveTargetPath(t, _ws);
+				}
+			} else if (step.output) {
 				parallel.output = step.output.replace(/\{unit\}/g, "{unit.path}");
 			}
-			// NOTE: pi-subagents' DynamicParallelTemplateSchema has no `tools` field
-			// (additionalProperties: false) — a per-task tools override is rejected
-			// outright by the tool call schema. Tool bounding is enforced at the
-			// *agent* level (agents/*.md `tools:` frontmatter) instead; see
-			// docs/PLAN.md open question #5. step.tools is intentionally not emitted here.
 			chain.push({
 				phase: step.phase,
 				label: step.label,
 				expand,
 				parallel,
-				collect: {
-					as: `collected_${sourceName}`,
-				},
+				collect: { as: step.outputs?.[0] ? slugifyAs(step.outputs[0].name) : `collected_${sourceName}` },
 			});
 		} else {
-			// Ordinary sequential step
 			const item: Record<string, any> = {
 				agent: step.agent,
 				phase: step.phase,
 				label: step.label,
-				task: step.task,
+				task: resolvedTask,
 			};
-			if (step.reads && step.reads.length > 0) {
-				item.reads = step.reads;
+			if (resolvedReads.length > 0) {
+				item.reads = resolvedReads;
 			}
-			if (step.output) {
+			if (step.outputs && step.outputs.length > 0 && _ws) {
+				const t = step.outputs[0];
+				item.output = resolveTargetPath(t, _ws);
+				item.as = slugifyAs(t.name); // register named output for {outputs.NAME} references
+				if (t.ext === "json") {
+					item.outputSchema = {
+						type: "object",
+						properties: {
+							items: {
+								type: "array",
+								items: {
+									type: "object",
+									properties: { path: { type: "string" } },
+									required: ["path"],
+								},
+							},
+						},
+						required: ["items"],
+					};
+				}
+			} else if (step.output) {
 				item.output = step.output;
-				// Auto-register structured schema if output file is a .json file
 				if (step.output.endsWith(".json")) {
 					const stem = step.output.replace(/\.json$/, "").replace(/[^A-Za-z0-9_]/g, "_");
 					item.as = stem;
@@ -346,20 +535,15 @@ export function compileRecipeToChain(plan: Plan): any[] {
 								type: "array",
 								items: {
 									type: "object",
-									properties: {
-										path: { type: "string" }
-									},
-									required: ["path"]
-								}
-							}
+									properties: { path: { type: "string" } },
+									required: ["path"],
+								},
+							},
 						},
-						required: ["items"]
+						required: ["items"],
 					};
 				}
 			}
-			// NOTE: pi-subagents' ChainItem schema has no `tools` field either
-			// (additionalProperties: false). Same rationale as the dynamic-parallel
-			// branch above — step.tools is intentionally not emitted here.
 			chain.push(item);
 		}
 	}

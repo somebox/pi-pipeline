@@ -14,6 +14,7 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import type { TargetSpec } from "./recipes.ts";
 
 /** Default location of the pi settings file. Overridable for tests. */
 export const DEFAULT_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "settings.json");
@@ -43,6 +44,7 @@ export interface PlanStep {
 	label: string;
 	task: string;
 	output?: string;
+	outputs?: TargetSpec[]; // NEW: structured target specs ( Stage 2 )
 	reads?: string[];
 	parallel?: number;
 	maxTools?: number;    // optional tool-call budget for this step (soft enforcement via task prompt)
@@ -538,6 +540,7 @@ export type FailureKind =
 	| "auth"               // 401/403 / api key / unauthorized
 	| "timeout"            // timed out
 	| "model-unavailable"  // model not found / disabled / unavailable
+	| "capability"         // chain schema rejected or runtime feature missing
 	| "unknown";
 
 const CONTEXT_OVERFLOW_RE = /maximum context length|context length is|context length/i;
@@ -545,6 +548,7 @@ const RATE_LIMIT_RE = /\b429\b|rate[\s-]?limit|too many requests|overloaded|temp
 const AUTH_RE = /\b40[13]\b|unauthori[sz]ed|api[\s-]?key|token expired|forbidden/i;
 const TIMEOUT_RE = /timed?\s*out|deadline exceeded/i;
 const MODEL_UNAVAILABLE_RE = /model.*(not found|disabled|unavailable)|unknown model|provider.*unavailable/i;
+const CAPABILITY_RE = /chain\b|additionalProperties|expand|collect|outputSchema|missing required key|is not supported/i;
 
 /** Classify a raw error string into a failure kind. */
 export function classifyFailure(error: string | undefined | null): FailureKind {
@@ -554,6 +558,7 @@ export function classifyFailure(error: string | undefined | null): FailureKind {
 	if (AUTH_RE.test(error)) return "auth";
 	if (TIMEOUT_RE.test(error)) return "timeout";
 	if (MODEL_UNAVAILABLE_RE.test(error)) return "model-unavailable";
+	if (CAPABILITY_RE.test(error)) return "capability";
 	return "unknown";
 }
 
