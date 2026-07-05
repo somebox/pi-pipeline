@@ -114,6 +114,7 @@ export function resolvePackagePipelineDirs(
 	packages: string[],
 	npmRoot: string,
 	gitRoot: string,
+	settingsDir?: string,
 ): string[] {
 	const out: string[] = [];
 	const seen = new Set<string>();
@@ -138,8 +139,13 @@ export function resolvePackagePipelineDirs(
 			const loc = atIdx >= 0 ? rest.slice(0, atIdx) : rest;
 			if (loc) add(path.join(gitRoot, loc));
 		} else {
-			// local path (absolute or relative)
-			add(path.resolve(s));
+			// local path (absolute or relative). Relative paths in settings
+			// are conventionally relative to the settings file's directory
+			// (e.g. `../../src/foo` in `~/.pi/agent/settings.json` means
+			// `~/src/foo`), not to process.cwd(). Use settingsDir when given;
+			// fall back to process.cwd() for backward compatibility.
+			const base = settingsDir ?? process.cwd();
+			add(path.resolve(base, s));
 		}
 	}
 	return out;

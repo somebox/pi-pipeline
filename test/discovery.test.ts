@@ -110,3 +110,46 @@ test("resolvePackagePipelineDirs: npm, git, and local-path sources", () => {
 	assert.ok(dirs.some((d) => d.endsWith("repo/pipelines")));
 	assert.ok(dirs.some((d) => d.endsWith("local-pkg/pipelines")));
 });
+
+test("resolvePackagePipelineDirs: relative path resolves against settingsDir, not cwd", () => {
+	// Reproduce the real-world bug: a relative path in settings.json
+	// (e.g. `../../src/pi-pipeline` next to `~/.pi/agent/`) must resolve
+	// against the settings file's directory, not against process.cwd().
+	// The TUI's cwd is often unrelated to the directory the user edited
+	// settings.json from.
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pipeline-disc-"));
+	// Layout: root/agent/settings.json  +  root/src/pi-pipeline/pipelines/x.md
+	// Relative path: "../src/pi-pipeline" (from agent/ to src/)
+	const agentDir = path.join(root, "agent");
+	fs.mkdirSync(agentDir, { recursive: true });
+	const pkg = path.join(root, "src", "pi-pipeline");
+	fs.mkdirSync(path.join(pkg, "pipelines"), { recursive: true });
+	write(path.join(pkg, "pipelines", "x.md"), "---\nname: x\n---\n# x\n");
+
+	const resolved = resolvePackagePipelineDirs(
+		["../src/pi-pipeline"],
+		path.join(agentDir, "npm", "node_modules"),
+		path.join(agentDir, "git"),
+		agentDir,
+	);
+	assert.equal(resolved.length, 1, `expected 1 dir, got ${resolved.length}: ${JSON.stringify(resolved)}`);
+	assert.equal(resolved[0], path.join(pkg, "pipelines"));
+
+	// Demonstrate the fix is needed: with a different cwd, the same call
+	// without settingsDir would resolve to the wrong place.
+	const previousCwd = process.cwd();
+	try {
+		process.chdir("/");
+		const buggy = resolvePackagePipelineDirs(
+			["../src/pi-pipeline"],
+			path.join(agentDir, "npm", "node_modules"),
+			path.join(agentDir, "git"),
+		);
+		// From cwd="/", "../src/pi-pipeline" resolves to "/src/pi-pipeline"
+		// — not our test fixture — so the package isn't found.
+		assert.equal(buggy.length, 0, "without settingsDir, the relative path resolves against cwd and misses the package");
+	} finally {
+		process.chdir(previousCwd);
+	}
+	fs.rmSync(root, { recursive: true, force: true });
+});

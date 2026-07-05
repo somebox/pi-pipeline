@@ -85,17 +85,22 @@ import type { WorkspaceInfo, ManifestStep } from "./workspace.ts";
  * /pipelines so they all see the same recipe set. */
 function discoverAllRecipes() {
 	const home = os.homedir();
+	const settingsDir = path.join(home, ".pi", "agent");
 	let packages: string[] = [];
 	try {
-		const settings = JSON.parse(fs.readFileSync(path.join(home, ".pi", "agent", "settings.json"), "utf8"));
+		const settings = JSON.parse(fs.readFileSync(path.join(settingsDir, "settings.json"), "utf8"));
 		packages = Array.isArray(settings?.packages) ? settings.packages.filter((p: unknown) => typeof p === "string") : [];
 	} catch { /* no settings -> no package dirs */ }
-	const npmRoot = path.join(home, ".pi", "agent", "npm", "node_modules");
-	const gitRoot = path.join(home, ".pi", "agent", "git");
+	const npmRoot = path.join(settingsDir, "npm", "node_modules");
+	const gitRoot = path.join(settingsDir, "git");
 	return discoverRecipes({
-		userDir: path.join(home, ".pi", "agent", "pipelines"),
+		userDir: path.join(settingsDir, "pipelines"),
 		projectDirs: findProjectPipelineDirs(process.cwd()),
-		packageDirs: resolvePackagePipelineDirs(packages, npmRoot, gitRoot),
+		// Pass settingsDir so relative paths in settings (`../../src/foo`)
+		// resolve against the settings file's directory, not process.cwd().
+		// Without this, the TUI's cwd breaks discovery when it differs
+		// from the directory the user edited settings.json from.
+		packageDirs: resolvePackagePipelineDirs(packages, npmRoot, gitRoot, settingsDir),
 	});
 }
 
@@ -318,6 +323,14 @@ pi.on("before_provider_request", (event) => {
 			const plan = resolved.plan;
 			const effectiveTask = p.task ?? (resolved.name ?? "(unnamed)");
 			let text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, effectiveTask, p.dryRun ?? false);
+
+			// Surface available recipes so the LLM (and user) can discover them
+			// without running /pipelines separately.
+			const availableRecipes = discoverAllRecipes();
+			if (availableRecipes.length > 0) {
+				text += "\n\n**Available recipes:** " + availableRecipes.map((r) => `\`${r.name}\``).join(", ");
+				text += " (run with `pipeline=<name>` to use one)";
+			}
 
 			// Reset per-op run state
 			lastRunSteps = [];
