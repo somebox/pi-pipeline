@@ -56,9 +56,9 @@ import {
 	STATIC_STATUS,
 } from "./lib.ts";
 import { buildPlanFromRecipe, validatePlanTargets } from "./recipes.ts";
-import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs } from "./discovery.ts";
+import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs, resolvePackageAgentDirs } from "./discovery.ts";
 import {
-	loadAgentProfile,
+	loadAgentProfileFromDirs,
 	dispatchStep,
 	dispatchIterate,
 	buildManifestStep,
@@ -83,25 +83,48 @@ import type { WorkspaceInfo, ManifestStep } from "./workspace.ts";
  * Build the discovery options from the live settings.json `packages` field
  * + the standard pi install roots. Used by resolvePlan, /pipeline, and
  * /pipelines so they all see the same recipe set. */
-function discoverAllRecipes() {
-	const home = os.homedir();
-	const settingsDir = path.join(home, ".pi", "agent");
-	let packages: string[] = [];
+function readConfiguredPackages(settingsDir: string): string[] {
 	try {
 		const settings = JSON.parse(fs.readFileSync(path.join(settingsDir, "settings.json"), "utf8"));
-		packages = Array.isArray(settings?.packages) ? settings.packages.filter((p: unknown) => typeof p === "string") : [];
-	} catch { /* no settings -> no package dirs */ }
-	const npmRoot = path.join(settingsDir, "npm", "node_modules");
-	const gitRoot = path.join(settingsDir, "git");
+		return Array.isArray(settings?.packages) ? settings.packages.filter((p: unknown) => typeof p === "string") : [];
+	} catch {
+		return [];
+	}
+}
+
+function packageRoots(settingsDir: string) {
+	return {
+		npmRoot: path.join(settingsDir, "npm", "node_modules"),
+		gitRoot: path.join(settingsDir, "git"),
+	};
+}
+
+function discoverAllRecipes(cwd = process.cwd()) {
+	const home = os.homedir();
+	const settingsDir = path.join(home, ".pi", "agent");
+	const packages = readConfiguredPackages(settingsDir);
+	const { npmRoot, gitRoot } = packageRoots(settingsDir);
 	return discoverRecipes({
 		userDir: path.join(settingsDir, "pipelines"),
-		projectDirs: findProjectPipelineDirs(process.cwd()),
+		projectDirs: findProjectPipelineDirs(cwd),
 		// Pass settingsDir so relative paths in settings (`../../src/foo`)
 		// resolve against the settings file's directory, not process.cwd().
 		// Without this, the TUI's cwd breaks discovery when it differs
 		// from the directory the user edited settings.json from.
 		packageDirs: resolvePackagePipelineDirs(packages, npmRoot, gitRoot, settingsDir),
 	});
+}
+
+function discoverAgentDirs(projectDir: string): string[] {
+	const home = os.homedir();
+	const settingsDir = path.join(home, ".pi", "agent");
+	const packages = readConfiguredPackages(settingsDir);
+	const { npmRoot, gitRoot } = packageRoots(settingsDir);
+	return [
+		path.resolve(projectDir, "agents"),
+		path.join(settingsDir, "agents"),
+		...resolvePackageAgentDirs(packages, npmRoot, gitRoot, settingsDir),
+	];
 }
 
 /* ──────────────────────── session-scoped state ────────────────────────
@@ -315,10 +338,17 @@ pi.on("before_provider_request", (event) => {
 						"If true, return the plan with cost shape but do not execute any subagent calls. Useful for the user to see the bill before dispatching.",
 				}),
 			),
+			review: Type.Optional(
+				Type.Boolean({
+					description:
+						"If true, show an interactive confirmation with the rendered plan before executing a named recipe. Cancelling returns the plan without dispatching.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string> };
+			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string>; review?: boolean };
+			const wantsReview = p.review === true || (p.hints ?? []).some((h) => /\b(review|confirm|approve|ask)\b/i.test(h));
 			const resolved = resolvePlan(p);
 			const plan = resolved.plan;
 			const effectiveTask = p.task ?? (resolved.name ?? "(unnamed)");
@@ -341,6 +371,21 @@ pi.on("before_provider_request", (event) => {
 					content: [{ type: "text" as const, text }],
 					details: pipelineDetails(plan, resolved.name, p.dryRun ?? false),
 				};
+			}
+
+			if (wantsReview) {
+				const ok = await ctx.ui.confirm(
+					`Run pipeline ${resolved.name}?`,
+					`${text}\n\nConfirm to execute ${plan.steps.length} step(s). Press Esc or choose No to cancel before dispatch.`,
+					{ signal },
+				);
+				if (!ok) {
+					text += "\n\n**Cancelled:** Review was declined before dispatch; no pipeline steps were executed.";
+					return {
+						content: [{ type: "text" as const, text }],
+						details: pipelineDetails(plan, resolved.name, true),
+					};
+				}
 			}
 
 			// Named, non-dryRun recipe: create workspace, dispatch each step, finalize.
@@ -374,7 +419,7 @@ pi.on("before_provider_request", (event) => {
 				return { content: [{ type: "text" as const, text }], details: pipelineDetails(plan, resolved.name, false) };
 			}
 
-			const agentsDir = path.resolve(projectDir, "agents");
+			const agentDirs = discoverAgentDirs(projectDir);
 
 			// Helper: build a cost-tracker-compatible step entry from a result
 			const stepEntry = (stepId: string, phase: string, agent: string, task: string, result: StepResult) => {
@@ -406,9 +451,20 @@ pi.on("before_provider_request", (event) => {
 				return e;
 			};
 
+			let aborted = false;
+			const abortListener = () => {
+				aborted = true;
+				if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", "Pipeline abort requested — waiting for current step to stop…");
+			};
+			signal.addEventListener("abort", abortListener, { once: true });
+
 			// Dispatch each step in order. Iterate steps read their unit list
 			// from the prior step's output; reduce steps read the collection.
 			for (let i = 0; i < plan.steps.length; i++) {
+				if (signal.aborted || aborted) {
+					text += "\n\n**Aborted:** Pipeline execution was interrupted before the next step started.\n";
+					break;
+				}
 				const step = plan.steps[i]!;
 				const stepId = manifestStepIds[i]!;
 
@@ -418,10 +474,12 @@ pi.on("before_provider_request", (event) => {
 				updateManifestStep(currentWorkspace, runningMs);
 				if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", `Step ${i + 1}/${plan.steps.length}: ${step.phase} (${step.agent})…`);
 
-				// Load the agent profile for this step's tier
-				const loaded = loadAgentProfile(step.agent, agentsDir);
+				// Load the agent profile for this step's tier. Search project/user/package
+				// agent dirs so package recipes remain self-contained when run from a
+				// target repo that has no local `agents/` directory.
+				const loaded = loadAgentProfileFromDirs(step.agent, agentDirs);
 				if (!loaded) {
-					const err = `Agent profile not found: ${step.agent} (looking in ${agentsDir})`;
+					const err = `Agent profile not found: ${step.agent} (searched ${agentDirs.join(", ")})`;
 					const failed: StepResult = {
 						status: "failed",
 						text: "",
@@ -440,7 +498,8 @@ pi.on("before_provider_request", (event) => {
 				if (step.iterate) {
 					units = loadUnits(currentWorkspace, step.iterate, projectDir);
 					if (units.length === 0) {
-						const err = `Iterate step "${step.phase}" references "${step.iterate}" but no unit list was found.`;
+						const expected = path.join(currentWorkspace.targetsDir, `${step.iterate}.json`);
+						const err = `Iterate step "${step.phase}" references "${step.iterate}" but no unit list was found. Expected ${expected} to contain either { "items": [...] } or a bare array.`;
 						const failed: StepResult = { status: "failed", text: "", error: err, usage: emptyUsage(), durationMs: 0 };
 						recordStepResult(currentWorkspace, stepId, failed, step.outputs?.[0]?.name);
 						lastRunSteps.push({ step: runningMs, result: failed });
@@ -454,7 +513,7 @@ pi.on("before_provider_request", (event) => {
 				try {
 					const opts = {
 						projectDir,
-						agentsDir,
+						agentsDir: loaded.agentsDir,
 						modelRegistry,
 						authStorage,
 						abortSignal: signal,
@@ -463,6 +522,7 @@ pi.on("before_provider_request", (event) => {
 					result = units
 						? await dispatchIterate(step, currentWorkspace, loaded.profile, units, opts)
 						: await dispatchStep(step, currentWorkspace, loaded.profile, opts);
+				if (signal.aborted) aborted = true;
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					result = { status: "failed", text: "", error: msg, usage: emptyUsage(), durationMs: 0 };
@@ -479,8 +539,24 @@ pi.on("before_provider_request", (event) => {
 				}
 			}
 
+			if (aborted || signal.aborted) {
+				// Mark not-yet-started steps as blocked so the manifest reflects an
+				// intentional interruption rather than a completed run with pending rows.
+				for (const stepId of manifestStepIds) {
+					try {
+						const manifest = JSON.parse(fs.readFileSync(currentWorkspace.manifestPath, "utf-8"));
+						const ms = manifest.steps?.find((s: ManifestStep) => s.id === stepId) as ManifestStep | undefined;
+						if (ms && (ms.status === "pending" || ms.status === "running")) {
+							ms.status = "blocked";
+							updateManifestStep(currentWorkspace, ms);
+						}
+					} catch { /* best effort */ }
+				}
+			}
+			signal.removeEventListener("abort", abortListener);
+
 			// Finalize the manifest (derives overall status from step statuses)
-			try { finalizeManifest(currentWorkspace); } catch { /* best effort */ }
+			try { finalizeManifest(currentWorkspace, aborted || signal.aborted ? "failed" : undefined); } catch { /* best effort */ }
 			if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", STATIC_STATUS);
 
 			// Build a cost report from the dispatched steps

@@ -3,7 +3,7 @@
 > Walked recipes with commentary. The recipe files themselves are the single
 > source of truth — this doc *describes* them and links to the real files
 > rather than duplicating them, so the two can't drift apart. For the format
-> see [SPEC.md](SPEC.md); for the model see [ARCHITECTURE.md](ARCHITECTURE.md).
+> see [spec.md](spec.md); for the model see [architecture.md](architecture.md).
 
 ## Shipped recipes
 
@@ -19,7 +19,7 @@ the repo's own standards, then produce a prioritized action plan. Eight
 steps, three profiles (`util` → `dev` × 2 → `research` → `high` → `dev` →
 `high` × 2). This is the "fixed checklist" shape — the simplest recipe form,
 no `iterate=`. It's also the failure case that motivated the iteration model
-(see ARCHITECTURE.md "Why iteration"): its step 1 invited the `util` agent to
+(see [architecture.md](architecture.md) "Why iteration"): its step 1 invited the `util` agent to
 explore the whole repo, which bloated context. The recipe is kept as-shipped
 for the checklist shape; a future `code-quality` v2 would rework steps 1–3
 as iteration over the in-scope files.
@@ -56,15 +56,22 @@ Files: [`pipelines/housekeeping.md`](../pipelines/housekeeping.md),
 
 `housekeeping` mirrors `code-quality`'s fixed-checklist shape (util →
 `parallel` dev review → research consolidation → high prioritization) but for
-general technical-debt sweeps. `docs-audit` is a heavier checklist with an
-iteration step in the middle (`dev, iterate=inventory`) restructuring docs
-file-by-file. `probe` is a minimal single-step recipe used to sanity-check the
-now-deprecated `maxTools` soft budget against an unbounded run — kept as a
-regression fixture, not a template to copy for new recipes.
+general technical-debt sweeps. `docs-audit` is the heaviest shipped recipe: an
+eight-step flow that discovers repo standards and auto-generated files,
+enumerates the corpus with git metadata, iterates over each file to summarize
+it and surface topics, builds a subject index, plans a reorganization
+(renames, merges, splits, archives, frontmatter standardization) in named
+phases, executes the plan phase-by-phase, sweeps cross-links and frontmatter,
+and produces a changelog plus user-facing summary. Two iteration phases
+alive at once: `dev, iterate=inventory` for per-file analysis, then
+`dev, iterate=reorg_plan` for per-phase execution. `probe` is a minimal
+single-step recipe used to sanity-check the now-deprecated `maxTools` soft
+budget against an unbounded run — kept as a regression fixture, not a
+template to copy for new recipes.
 
-### `screenshot-worklog` — iteration over non-files, with a coordinator
+### `screenshot-worklog` — planned iteration over non-files, with a coordinator
 
-File: `pipelines/screenshot-worklog.md` *(to be added in Phase 2)*
+File: `pipelines/screenshot-worklog.md` *(planned; not currently shipped)*
 
 The richer iteration case: for every screenshot in `~/screenshots`, look for
 commits after it, match to a card/feature, review the image, attach to the
@@ -74,7 +81,7 @@ board and writes both `shots.json` and `per-unit-prompt.md` (the matching
 logic is complex enough to warrant an authored template). Step 2 is a
 per-unit *chain* (commits → match → review → attach → rename → file) owned
 by one focused `dev` agent whose *own* `tools:` frontmatter is `read, write,
-bash` (not a per-step override — see SPEC.md's `tools=` note: the compiled
+bash` (not a per-step override — see [spec.md](spec.md)'s `tools=` note: the compiled
 chain schema has no such field, so the bound has to live on the agent). The
 small-context guarantee holds because the subagent sees one screenshot + the
 shared board list + the prompt — not the whole repo or all screenshots.
@@ -106,12 +113,12 @@ exercise rather than a shipped recipe — the mechanism is identical to
 
 ## Authoring a new recipe
 
-Until `pi pipeline new` ships (Phase 3), copy the closest shipped recipe and
-edit. The three shapes above cover the common cases:
+Until `pi pipeline new` ships (planned for Phase 3), copy the closest shipped
+recipe and edit. The three shapes above cover the common cases:
 
 - **Fixed checklist** → copy `verify-source` (simplest) or `code-quality` (multi-step).
-- **Iteration over files** → copy `summarize-files` (when it ships) and change the glob + the per-unit task.
-- **Iteration over non-files / judgment enumeration** → copy `screenshot-worklog` (when it ships) and change the enumerate logic + per-unit prompt.
+- **Iteration over files** → copy `summarize-files` and change the glob + the per-unit task.
+- **Iteration over non-files / judgment enumeration** → start from the planned `screenshot-worklog` shape and change the enumerate logic + per-unit prompt.
 
-See [SPEC.md](SPEC.md) for the full grammar (frontmatter, step header flags,
+See [spec.md](spec.md) for the full grammar (frontmatter, step header flags,
 placeholders, inference rules).

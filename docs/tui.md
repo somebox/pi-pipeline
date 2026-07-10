@@ -1,7 +1,7 @@
 # TUI — List / Overview / Dashboard
 
 > The three user-facing views, replacing the current text commands. For the
-> invocation model see [SPEC.md](SPEC.md); for status see [PLAN.md](PLAN.md).
+> invocation model see [spec.md](spec.md); for status see [plan.md](plan.md).
 
 Three views, replacing the current text command + `/pipeline-costs`.
 
@@ -14,7 +14,8 @@ package). Select one to:
 - **View steps** → read the full step list + descriptions
 - **Edit recipe** → open the `.md` in the external editor (recipes only)
 - **Edit profiles** → show the agent→model mapping for this pipeline's
-  agents; edit writes to `subagents.agentOverrides` in settings.json
+  agents. Edits write only the selected agent overrides to
+  `subagents.agentOverrides` in settings.json, preserving unrelated settings.
 - **Remove** → for installed packages, shell out to `pi remove <source>`
 - **Add** → prompt for a source string (git URL, local path, or `npm:name`),
   shell out to `pi install <source>`, prompt `/reload`
@@ -41,8 +42,9 @@ are all instances of this, not separate features.
   coordinator = bad whole run.
 - Actions: **Confirm** / **Edit inputs** / **Edit profiles** / **Cancel**
 
-On Confirm, the tool returns the plan to the LLM, which executes it with
-`subagent` calls. The dashboard becomes available.
+On Confirm, the pipeline tool starts the run itself via the owned dispatcher;
+the LLM does not orchestrate child-agent calls. The dashboard becomes
+available.
 
 > **API note:** the overview gates inside the `pipeline` tool handler (the
 > LLM calls the tool; the tool blocks on user confirmation). Pi supports
@@ -73,8 +75,8 @@ green checkmark, active stages a yellow animation spin, and pending stages stay
 grey/dimmed.
 
 #### B. Tree-Like Step List & Indentation
-Below the horizontal graph, the active process layout is rendered as an indented,
-indented-tree outline (utilizing `├──` and `└──` ANSI characters). This represents
+Below the horizontal graph, the active process layout is rendered as an indented
+tree outline (utilizing `├──` and `└──` ANSI characters). This represents
 subprocesses, active parallel dispatches, and step states:
 
 ```

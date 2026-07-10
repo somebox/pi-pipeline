@@ -5,9 +5,13 @@
 > behind the outputs the parent or user cares about. This is not a general
 > artifact backend. It is the pipeline's small build system.
 
-## Status (as of 2026-07-05)
+## Status
 
-| Stage | Status | Notes |
+The canonical roadmap and current phase status live in [plan.md](plan.md).
+This file keeps implementation notes for the artifact/workspace layer; avoid
+using the snapshot below as a release checklist.
+
+| Stage | Status at 2026-07-05 snapshot | Notes |
 |---|---|---|
 | 1 — workspace + manifest | Done | `src/workspace.ts` + extension hooks; mint/cleanup/retention functional |
 | 2 — target syntax | Done | `TargetSpec`/`parseOutputSpec`/`validatePlanTargets` + workspace-aware compiler; golden fixture passes |
@@ -267,13 +271,13 @@ logical handle the manifest and reduce step use.
 ## Compiler output contract (retired)
 
 The compiled-chain JSON below was the contract for the now-retired
-`compileRecipeToChain` serializer. It is preserved as a reference for the
-path-resolution and target-naming decisions that carry over to the
-dispatcher, but the chain output itself is no longer emitted.
+`compileRecipeToChain` serializer. It is preserved as a historical reference
+for path-resolution and target-naming decisions, but the chain output itself
+is no longer emitted.
 
-This is the exact chain JSON the compiler must emit for the target-based
-`summarize-files` above. It is the normative fixture for the Stage 2 golden
-test; if the compiler and this block disagree, one of them is wrong.
+The following JSON is the exact chain the old compiler emitted for the
+target-based `summarize-files` example. It is a retired fixture, not the
+current dispatcher contract.
 
 ```json
 [
@@ -583,27 +587,57 @@ recipe. Retry can later re-run only failed file summaries.
 
 ### 2. `docs-audit`
 
-The important case is mixed effects: repo mutation plus build handoff.
+The important case is mixed effects: repo mutation plus build handoff, and
+the heaviest shipped recipe (eight steps, two iteration phases alive at
+once). The current shape:
 
 ```markdown
-## 1. Inventory & linkage check  (util, output=inventory:json)
-Scan `project:{{docs_dir}}` and write inventory items.
+## 1. Repo standards, layout & auto-generated detection  (util, output=repo_standards:json)
+Scan the repo for README/CONTRIBUTING/CHANGELOG/LINTING/PUBLISHING, the
+current doc layout, and files to exclude (auto-generated, build output).
 
-## 2. Propose restructuring plan  (high, reads=inventory, output=reorg_plan)
-Read inventory and write the plan.
+## 2. Enumerate docs with metadata  (util, reads=repo_standards, output=inventory:json)
+Walk `{{docs_dir}}` and top-level `.md` files; for each, capture lines/bytes
+plus git metadata (last-modified, last-commit-msg, commit-count) so the
+analyser can judge freshness.
 
-## 3. Restructure each file  (dev, iterate=inventory, reads=reorg_plan, output=change_log-{unit.path})
-For `{unit.path}`, apply the planned doc edits in `project:`. Then write a
-short change log for that unit.
+## 3. Analyze each file  (dev, iterate=inventory, reads=repo_standards, output=analysis-{unit.path})
+For each file: summary, topics, freshness verdict, quality, size, formatting,
+naming, issues, suggested improvements.
 
-## 4. Fix links  (research, reads=change_log, output=link_status)
-Read the collected change logs and fix cross-links in `project:`. Write link status.
+## 4. Build the subject index  (research, reads=analysis, inventory, repo_standards, output=subject_index)
+Cluster files by topic; identify overlaps, gaps, naming/structure issues,
+frontmatter inconsistency, archive and refresh candidates.
+
+## 5. Plan the restructuring  (high, reads=inventory, analysis, subject_index, repo_standards, output=reorg_plan:json)
+New layout, per-file actions (move/rename/merge/split/archive/delete/keep),
+frontmatter schema, naming standardization, phased execution. The plan is
+the iteration handle for step 6 — each top-level `items` element is a phase
+with its actions embedded.
+
+## 6. Execute the plan  (dev, iterate=reorg_plan, reads=reorg_plan, repo_standards, output=phase_log-{unit.path})
+One subagent per phase. Processes the phase's actions in order, verifying
+each; writes a phase log.
+
+## 7. Fix cross-links, frontmatter, titles, references  (research, reads=phase_log, reorg_plan, repo_standards, output=link_status)
+Sweep the docs tree and main README; fix links, normalize frontmatter, verify
+titles, update references, reconcile the main README with the new structure.
+
+## 8. Spot-check, write changelog, summarize  (high, reads=phase_log, link_status, reorg_plan, repo_standards, output=summary)
+Spot-check, then write a project-style changelog plus a user-facing summary
+(including the rendered plan as an appendix).
 ```
 
 Here, project mutations are explicit in prose and visible in tool-call audit
 (`edit`/`write` touched paths under `project_dir`). The build outputs
-`inventory`, `reorg_plan`, `change_log`, and `link_status` are targets in the
-run workspace.
+`repo_standards`, `inventory`, `analysis`, `subject_index`, `reorg_plan`,
+`phase_log`, `link_status`, and `summary` are targets in the run workspace.
+Two iteration phases are alive at once: `iterate=inventory` for per-file
+analysis, then `iterate=reorg_plan` for per-phase execution. The plan
+author decides phase boundaries; phases are dispatched in parallel, but
+actions within a phase run sequentially inside the phase subagent, so the
+plan author is responsible for ensuring in-phase actions touch different
+files and have no order dependencies.
 
 Open issue remains: two fan-out slots mutating `project:` can race. The lean
 answer is still agent-level isolation: ship a `dev-worktree` agent for recipes

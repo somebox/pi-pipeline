@@ -67,7 +67,7 @@ export function parseAgentFrontmatter(raw: string): Record<string, string | stri
 
 /** Load a named agent profile from `agents/<name>.md`. Returns the
  *  profile plus the raw file text (for the systemPrompt body). */
-export function loadAgentProfile(name: string, agentsDir: string): { profile: AgentProfile; body: string } | null {
+export function loadAgentProfile(name: string, agentsDir: string): { profile: AgentProfile; body: string; agentsDir: string } | null {
 	const file = path.join(agentsDir, `${name}.md`);
 	let raw: string;
 	try {
@@ -93,7 +93,23 @@ export function loadAgentProfile(name: string, agentsDir: string): { profile: Ag
 		inheritProjectContext: fm["inheritProjectContext"] === "false" ? false : true,
 		inheritSkills: fm["inheritSkills"] === "false" ? false : true,
 	};
-	return { profile, body };
+	return { profile, body, agentsDir };
+}
+
+/** Load a named agent from the first directory that contains it. This lets a
+ *  package recipe use the package's bundled agents even when the target repo
+ *  has no local `agents/` directory, while still allowing project/user agents
+ *  to override package defaults by search-order. */
+export function loadAgentProfileFromDirs(name: string, agentDirs: string[]): { profile: AgentProfile; body: string; agentsDir: string } | null {
+	const seen = new Set<string>();
+	for (const dir of agentDirs) {
+		const resolved = path.resolve(dir);
+		if (seen.has(resolved)) continue;
+		seen.add(resolved);
+		const loaded = loadAgentProfile(name, resolved);
+		if (loaded) return loaded;
+	}
+	return null;
 }
 
 /* ──────────────────────── result shape ──────────────────────── */
@@ -114,6 +130,8 @@ export interface StepResult {
 	usage: StepUsage;
 	durationMs: number;
 	units?: Array<ManifestUnitEntry & { text?: string; error?: string; usage?: StepUsage; durationMs?: number }>;
+	/** Named singleton outputs parsed from files the step wrote. */
+	targets?: Record<string, unknown>;
 }
 
 export interface DispatchOpts {
@@ -308,7 +326,22 @@ export async function createStepSession(opts: SessionOpts): Promise<{ session: a
 		});
 	}
 
-	return { session, dispose: () => session.dispose() };
+	const abortHandler = () => {
+		try { void session.abort(); }
+		catch { /* best effort */ }
+	};
+	if (opts.abortSignal) {
+		if (opts.abortSignal.aborted) abortHandler();
+		else opts.abortSignal.addEventListener("abort", abortHandler, { once: true });
+	}
+
+	return {
+		session,
+		dispose: () => {
+			if (opts.abortSignal) opts.abortSignal.removeEventListener("abort", abortHandler);
+			session.dispose();
+		},
+	};
 }
 
 /* ──────────────────────── single-step dispatch ──────────────────────── */
@@ -336,15 +369,20 @@ export async function dispatchStep(
 		const messages = session.messages ?? [];
 		const { usage, hadError, hadAborted } = extractUsageAndStatus(messages);
 		const text = extractText(messages);
-		const status: StepResult["status"] = hadError || hadAborted ? "failed" : "completed";
+		const sessionStatus: StepResult["status"] = hadError || hadAborted ? "failed" : "completed";
+		if (sessionStatus === "completed") persistMissingSingletonOutputs(step, ws, text);
+		const targets = collectWrittenTargets(step, ws);
+		const outputError = sessionStatus === "completed" ? missingOutputError(step, ws) : undefined;
 		const result: StepResult = {
-			status,
+			status: outputError ? "failed" : sessionStatus,
 			text,
 			usage,
 			durationMs: Date.now() - start,
 		};
+		if (targets) result.targets = targets;
 		if (hadError) result.error = "agent error";
 		if (hadAborted) result.error = "aborted";
+		if (outputError) result.error = outputError;
 		return result;
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
@@ -490,6 +528,10 @@ function composeTask(step: PlanStep, ws: WorkspaceInfo): string {
 		const t = step.outputs[0];
 		const abs = resolveOutputAbs(t, ws);
 		lines.push(`Write your output to: ${abs}`);
+		if (t.kind === "singleton") {
+			lines.push(`If your tool profile cannot write files directly, put the complete ${t.ext.toUpperCase()} output in your final response; the dispatcher will persist it to that path.`);
+			if (t.ext === "json") lines.push("For JSON outputs, the final response must be a valid JSON object or array, with no prose outside the JSON.");
+		}
 	} else if (step.output) {
 		lines.push(`Write your output to: ${step.output}`);
 	}
@@ -510,23 +552,16 @@ function composeIterateTask(step: PlanStep, ws: WorkspaceInfo, unit: IterateUnit
 	lines.push(`Use the scratch directory ${tempDir} for any temporary files you create.`);
 	lines.push(`Do not write your main output there; use the output path specified below.`);
 	if (step.outputs && step.outputs[0]?.kind === "collection") {
-		const t = step.outputs[0];
-		// `{unit.path}` in a collection pattern means the unit's *stem* (no
-		// extension) — the target's extension is always appended. This avoids
-		// double-`.md` on markdown units. `{unit.path.full}` keeps the full
-		// path including extension for callers who want it.
-		const unitKeyClean = unitKey.replace(new RegExp(`\\.${t.ext}$`), "");
-		const substituted = (t.rawPath ?? `${t.name}-${unitKeyClean}.${t.ext}`)
-			.replace(/\{unit\.path\.full\}/g, unitKey)
-			.replace(/\{unit\.path\}/g, unitKeyClean);
-		const abs = path.join(ws.collectionsDir, t.name, substituted);
+		const abs = resolveCollectionOutputAbs(step.outputs[0], ws, unit);
 		lines.push(`Write your output to: ${abs}`);
+		lines.push("If your tool profile cannot write files directly, put the complete markdown output in your final response; the dispatcher will persist it to that path.");
 	}
 	lines.push("");
 	let task = step.task;
 	for (const [k, v] of Object.entries(unit)) {
 		task = task.replace(new RegExp(`\\{unit\\.${k}\\}`, "g"), String(v));
 	}
+	task = task.replace(/\{unit\}/g, unitKey);
 	lines.push(task);
 	return lines.join("\n");
 }
@@ -540,9 +575,92 @@ function resolveOutputAbs(t: { scheme: string; rawPath?: string; name: string; e
 	return t.rawPath ?? t.name;
 }
 
-function resolveReadAbs(read: string, _ws: WorkspaceInfo): string {
+function resolveCollectionOutputAbs(t: { rawPath?: string; name: string; ext: string }, ws: WorkspaceInfo, unit: IterateUnit): string {
+	const unitKey = String(unit.path ?? unit.id ?? "unit");
+	// `{unit.path}` in a collection pattern means the unit's *stem* (no
+	// extension) — the target's extension is always appended. This avoids
+	// double-`.md` on markdown units. `{unit.path.full}` keeps the full path
+	// including extension for callers who want it.
+	const unitKeyClean = unitKey.replace(new RegExp(`\\.${t.ext}$`), "");
+	const substituted = (t.rawPath ?? `${t.name}-${unitKeyClean}.${t.ext}`)
+		.replace(/\{unit\.path\.full\}/g, unitKey)
+		.replace(/\{unit\.path\}/g, unitKeyClean)
+		.replace(/\{unit\}/g, unitKeyClean);
+	return path.join(ws.collectionsDir, t.name, substituted);
+}
+
+function resolveReadAbs(read: string, ws: WorkspaceInfo): string {
 	if (read.startsWith("project:")) return read.slice(8);
+	// Named target reference.
+	if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(read)) {
+		const mdPath = path.join(ws.targetsDir, `${read}.md`);
+		const jsonPath = path.join(ws.targetsDir, `${read}.json`);
+		const collectionDir = path.join(ws.collectionsDir, read);
+		if (fs.existsSync(mdPath)) return mdPath;
+		if (fs.existsSync(jsonPath)) return jsonPath;
+		if (fs.existsSync(collectionDir)) return collectionDir;
+	}
 	return read;
+}
+
+function persistMissingSingletonOutputs(step: PlanStep, ws: WorkspaceInfo, text: string): void {
+	for (const t of step.outputs ?? []) {
+		if (t.kind !== "singleton") continue;
+		const abs = resolveOutputAbs(t, ws);
+		if (fs.existsSync(abs)) continue;
+		let content = text;
+		if (t.ext === "json") {
+			const parsed = parseJsonFromText(text);
+			if (parsed === undefined) continue;
+			content = JSON.stringify(parsed, null, 2);
+		}
+		fs.mkdirSync(path.dirname(abs), { recursive: true });
+		fs.writeFileSync(abs, content, "utf-8");
+	}
+}
+
+function parseJsonFromText(text: string): unknown | undefined {
+	const trimmed = text.trim();
+	const candidates = [trimmed];
+	const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```$/i);
+	if (fenced) candidates.unshift(fenced[1]!.trim());
+	const objectStart = trimmed.search(/[\[{]/);
+	const objectEnd = Math.max(trimmed.lastIndexOf("}"), trimmed.lastIndexOf("]"));
+	if (objectStart >= 0 && objectEnd > objectStart) candidates.push(trimmed.slice(objectStart, objectEnd + 1));
+	for (const c of candidates) {
+		try { return JSON.parse(c); }
+		catch { /* try next */ }
+	}
+	return undefined;
+}
+
+function collectWrittenTargets(step: PlanStep, ws: WorkspaceInfo): Record<string, unknown> | undefined {
+	const targets: Record<string, unknown> = {};
+	for (const t of step.outputs ?? []) {
+		if (t.kind !== "singleton") continue;
+		const abs = resolveOutputAbs(t, ws);
+		try {
+			const raw = fs.readFileSync(abs, "utf-8");
+			targets[t.name] = t.ext === "json" ? JSON.parse(raw) : raw;
+		} catch {
+			// Missing or invalid target: leave it out. `missingOutputError` turns
+			// missing/invalid structured outputs into an actionable step failure.
+		}
+	}
+	return Object.keys(targets).length > 0 ? targets : undefined;
+}
+
+function missingOutputError(step: PlanStep, ws: WorkspaceInfo): string | undefined {
+	for (const t of step.outputs ?? []) {
+		if (t.kind !== "singleton") continue;
+		const abs = resolveOutputAbs(t, ws);
+		if (!fs.existsSync(abs)) return `Expected output was not written: ${abs}`;
+		if (t.ext === "json") {
+			try { JSON.parse(fs.readFileSync(abs, "utf-8")); }
+			catch { return `Expected JSON output is invalid: ${abs}`; }
+		}
+	}
+	return undefined;
 }
 
 /* ──────────────────────── manifest update helper ──────────────────────── */
@@ -616,13 +734,18 @@ export function recordStepResult(
 	result: StepResult,
 	collectionName?: string,
 ): void {
-	const name = collectionName ?? stepId;
+	const manifest = (() => {
+		try { return JSON.parse(fs.readFileSync(ws.manifestPath, "utf-8")); }
+		catch { return undefined; }
+	})();
+	const existing = manifest?.steps?.find((s: ManifestStep) => s.id === stepId) as ManifestStep | undefined;
 	const step: ManifestStep = {
+		...(existing ?? {}),
 		id: stepId,
-		phase: stepId,
-		agent: "",
+		phase: existing?.phase ?? stepId,
+		agent: existing?.agent ?? "",
 		status: result.status,
-		attempts: 1,
+		attempts: (existing?.attempts ?? 0) + 1,
 		usage: {
 			input: result.usage.input,
 			output: result.usage.output,
@@ -633,12 +756,16 @@ export function recordStepResult(
 	};
 	if (result.error) (step as any).error = result.error;
 	if (result.units) {
-		(step as any).outputs = [{
+		const name = collectionName ?? stepId;
+		step.outputs = [{
 			name,
 			kind: "collection",
 			path: `collections/${name}/`,
 			units: result.units,
 		}];
+	} else if (existing?.outputs) {
+		step.outputs = existing.outputs;
 	}
+	if (result.targets) (step as any).targets = result.targets;
 	updateManifestStep(ws, step);
 }

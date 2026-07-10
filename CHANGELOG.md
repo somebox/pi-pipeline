@@ -4,6 +4,19 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Package agent discovery (`resolvePackageAgentDirs`) and `loadAgentProfileFromDirs`, so recipes can use a package's bundled agents when the target repo has no local `agents/` directory (project/user still override).
+- Dispatcher persists missing singleton/collection outputs from the agent's final response when the tool profile can't write files, validates required JSON outputs after a step, and surfaces named singleton `targets` on `StepResult` / the manifest.
+- `pipeline` tool `review` flag (and review-ish hints) opens an interactive confirm before dispatching a named recipe; cancel returns the plan with no steps run.
+- Abort handling: mid-run interrupt marks pending/running steps `blocked` and leaves remaining steps unstarted; per-session abort signals stop the active subagent session.
+
+### Changed
+- `docs-audit` recipe expanded to an 8-step flow: discover standards → inventory with git metadata → per-file analysis → subject index → phased reorg plan → execute per phase → fix links/frontmatter → changelog + summary.
+- Documentation housekeeping: lowercase docs paths (`docs/architecture.md` etc.), link fixes, and small stale-status cleanups.
+- Manifest step recording preserves prior phase/agent/outputs and increments `attempts` across retries.
+
 ## 0.5.0 — 2026-07-04
 
 Phase 2: iteration via compile-to-chain, verified live against a real repo.
@@ -36,7 +49,7 @@ construction.
   the iteration proof-of-concept, verified live end-to-end.
 - `test/agents.test.ts` — guards that every shipped agent with an explicit
   `tools:` allowlist includes `structured_output`.
-- `docs/{ARCHITECTURE,SPEC,PLAN,EXAMPLES,TUI}.md` — split from a single
+- `docs/{architecture,spec,plan,examples,tui}.md` — split from a single
   `SPEC.md` into a modular docs directory.
 
 ### Fixed (found via a live spike against a real Go repo, `~/src/cards`)
@@ -67,6 +80,8 @@ construction.
   so any `outputSchema` step routed to them failed with "Missing
   structured_output call" even when the model behaved correctly. Added
   `structured_output` to all five agents' `tools:` lines.
+- **Package metadata version corrected.** The `package.json` version lag noted
+  in the 0.4.0 backfill was corrected as part of the 0.5.0 release.
 
 ### Removed
 - `/pipeline-spike` debug command — a hand-authored, machine-specific,
@@ -93,7 +108,7 @@ bumped alongside the tag, corrected in 0.5.0.)
   path, with cost shape per recipe.
 - `agents/dev.md` — low-cost surgical-edit profile between `util` and
   `research`. Dropped `costClass`/`tier` in favor of a plain `agent` field;
-  a profile is just an agent (see ARCHITECTURE.md principle #2).
+  a profile is just an agent (see `docs/architecture.md` principle #2).
 - `RunMetrics` as the single source of truth for `/pipeline-audit` (task,
   model, errors, attempts, tool calls, artifact paths, context-overflow
   flag).
@@ -141,5 +156,3 @@ test coverage, and repo hygiene.
 - Cost state is reset on `session_start` so `/pipeline-costs` never leaks
   data from a previous session in a long-lived process.
 
-### Removed
-- Nothing (first standalone release).

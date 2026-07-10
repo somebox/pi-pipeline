@@ -1,8 +1,8 @@
 # Spec — Recipe Format
 
 > The normative contract. If you implement exactly this, you're correct. For
-> the *why* see [ARCHITECTURE.md](ARCHITECTURE.md); for examples see
-> [EXAMPLES.md](EXAMPLES.md).
+> the *why* see [architecture.md](architecture.md); for examples see
+> [examples.md](examples.md).
 
 ## Recipe format
 
@@ -58,8 +58,8 @@ A `# <name>` H1 (title, ignored) followed by numbered
   false`) and neither has a `tools` field, so a per-step override is rejected
   outright by the tool call schema. Real enforcement is agent-level only: pick
   an agent (or add a bounded variant, e.g. `dev-bounded.md`) whose own
-  `tools:` frontmatter matches what you want. See ARCHITECTURE.md principle #5
-  and docs/PLAN.md open question #5.
+  `tools:` frontmatter matches what you want. See [architecture.md](architecture.md)
+  principle #5 and [plan.md](plan.md) open question #5.
 
   **Agent `tools:` gotcha:** any agent with an explicit `tools:` allowlist
   must include `structured_output`, or every step with `outputSchema` routed
@@ -67,7 +67,7 @@ A `# <name>` H1 (title, ignored) followed by numbered
   built-in, extension, *and* dynamically-registered tools, and
   `structured_output` is registered per-step by the runtime, not a built-in.
 - `parallel` (legacy) — soft fan-out hint; superseded by `iterate=`.
-- `maxTools` (deprecated) — see ARCHITECTURE.md Non-goals.
+- `maxTools` (deprecated) — see [architecture.md](architecture.md) Non-goals.
 
 The section's body paragraphs are the task text, verbatim.
 

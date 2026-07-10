@@ -14,6 +14,7 @@ import os from "node:os";
 import {
 	parseAgentFrontmatter,
 	loadAgentProfile,
+	loadAgentProfileFromDirs,
 	extractUsageAndStatus,
 	extractText,
 	buildManifestStep,
@@ -23,7 +24,7 @@ import {
 	type AgentProfile,
 	type StepResult,
 } from "../src/dispatcher.ts";
-import { createWorkspace, loadArtifactsConfig, writeManifestShell } from "../src/workspace.ts";
+import { createWorkspace, loadArtifactsConfig, writeManifestShell, updateManifestStep } from "../src/workspace.ts";
 import { buildPlanFromRecipe } from "../src/recipes.ts";
 
 /* ─────────── parseAgentFrontmatter ─────────── */
@@ -118,6 +119,25 @@ test("loadAgentProfile: returns null for missing file", () => {
 	assert.equal(result, null);
 });
 
+test("loadAgentProfileFromDirs: falls back to later dirs", () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pipeline-agentdirs-"));
+	const projectAgents = path.join(tmp, "project", "agents");
+	const packageAgents = path.join(tmp, "package", "agents");
+	fs.mkdirSync(packageAgents, { recursive: true });
+	fs.writeFileSync(path.join(packageAgents, "util.md"), `---
+name: util
+description: Package util
+tools: read, structured_output
+---
+
+Package util body.`);
+	const result = loadAgentProfileFromDirs("util", [projectAgents, packageAgents]);
+	assert.ok(result);
+	assert.equal(result!.agentsDir, packageAgents);
+	assert.equal(result!.profile.description, "Package util");
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 /* ─────────── extractUsageAndStatus ─────────── */
 
 test("extractUsageAndStatus: sums assistant usage, detects error/abort", () => {
@@ -210,6 +230,34 @@ test("recordStepResult: updates manifest with real statuses", () => {
 	assert.equal(manifest.steps[0]!.status, "completed");
 	assert.equal(manifest.steps[0]!.usage.input, 100);
 	assert.equal(manifest.steps[0]!.usage.cost, 0.001);
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("recordStepResult: preserves manifest outputs and stores parsed targets", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-dispatcher-${Date.now()}`);
+	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	writeManifestShell(ws, "x", tmp);
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Plan  (high, output=reorg_plan:json)\nWrite a plan.",
+		nameFallback: "x",
+	});
+	const ms = buildManifestStep(plan.steps[0]!, ws);
+	ms.status = "running";
+	// Simulate the extension's pre-populated manifest row.
+	updateManifestStep(ws, ms);
+	const result: StepResult = {
+		status: "completed",
+		text: "done",
+		usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 },
+		durationMs: 10,
+		targets: { reorg_plan: { items: [{ path: "p1" }] } },
+	};
+	recordStepResult(ws, "plan", result);
+	const manifest = JSON.parse(fs.readFileSync(ws.manifestPath, "utf-8"));
+	assert.equal(manifest.steps[0]!.phase, "Plan");
+	assert.equal(manifest.steps[0]!.agent, "high");
+	assert.equal(manifest.steps[0]!.outputs[0]!.name, "reorg_plan");
+	assert.deepEqual(manifest.steps[0]!.targets.reorg_plan.items, [{ path: "p1" }]);
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
 

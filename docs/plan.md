@@ -1,8 +1,8 @@
 # Plan — Status & Next Steps
 
 > What's done, what's next, and what's still open. Living roadmap. For the
-> *what/why* see [ARCHITECTURE.md](ARCHITECTURE.md); for the format see
-> [SPEC.md](SPEC.md).
+> *what/why* see [architecture.md](architecture.md); for the format see
+> [spec.md](spec.md).
 
 ## Implementation phasing
 
@@ -61,14 +61,15 @@ verified live against a real repo; the next big lever is the overview TUI.**
   All 5 shipped agents (`dev`, `util`, `research`, `high`, `coordinator`) now
   include `structured_output` in their `tools:` line; `test/agents.test.ts`
   guards the invariant.
-- `iterate=glob:<pattern>` shorthand for mechanical enumeration (no agent) —
-  **not yet implemented**, carried to a follow-up.
 - `<name>.json` as the inter-step iterable contract (not a bare `units.json`).
-- **Deprecate `maxTools`** (no-op hint for one release, then remove) —
-  **not yet removed**, carried to a follow-up.
-- Structural validation at load time (`iterate=` references resolve;
-  `{unit.field}` fields exist in the producing step's schema) — **not yet
-  implemented**, folded into Phase 3's overview TUI validation pass instead.
+- Follow-ups carried out of Phase 2:
+  - `iterate=glob:<pattern>` shorthand for mechanical enumeration (no agent)
+    is **not yet implemented**.
+  - **Deprecate `maxTools`** (no-op hint for one release, then remove) is
+    **not yet removed**.
+  - Structural validation at load time (`iterate=` references resolve;
+    `{unit.field}` fields exist in the producing step's schema) is **not yet
+    implemented**; fold it into Phase 3's overview TUI validation pass.
 - Proof-of-concept: `summarize-files`-shaped chain validated against a real
   repo (`~/src/cards`, Go codebase) — enumerate step wrote 3 files via
   `structured_output`, 3 parallel `dev` slots each read one file and wrote a
@@ -131,7 +132,7 @@ verified live against a real repo; the next big lever is the overview TUI.**
    cumulative", and "time per step/model" without re-deriving. Captured for
    every run regardless of whether a cost command is invoked.
 
-## Remaining open questions
+## Open and recently resolved questions
 
 1. **Dashboard coexistence** — full-screen toggle vs. always-visible widget
    strip for v1? Lean: ship a `setWidget` strip in Phase 5, full dashboard
@@ -168,10 +169,11 @@ verified live against a real repo; the next big lever is the overview TUI.**
    "retry failed units" (re-dispatch only units whose output file is
    missing). This replaces the parent's observed 5× blind retry loop.
    (Was open Q7; settled by review.)
-8. **Per-unit concurrency — resolved: inherit from pi-subagents.** The
-   compile-to-chain strategy reuses pi-subagents' `concurrency` param
-   rather than building our own. Default 4; overridable in the recipe.
-   (Was open Q8; settled by the compile strategy.)
+8. **Per-unit concurrency — resolved: own dispatcher with the same cap.** The
+   dispatcher owns the per-unit worker pool directly and keeps the same
+   default concurrency cap (4), overridable in the recipe. (Was open Q8;
+   originally settled by the compile strategy, then preserved by the
+   own-dispatch pivot.)
 9. **Coordinator trust — resolved: show in overview.** If a `coordinator`
    authored `per-unit-prompt.md`, the overview TUI shows it before
    dispatching. (Was open Q9; settled by review.)
@@ -185,7 +187,7 @@ verified live against a real repo; the next big lever is the overview TUI.**
     renaming the file breaks the reference. Should steps have an explicit
     `id:` (defaulting to the slugified phase or step number) that `iterate=`
     references instead? Lean: yes — decouples wiring from prose edits.
-12. **Doc structure — resolved: split done.** The single 850-line SPEC.md
-    is now `docs/{ARCHITECTURE,SPEC,PLAN,EXAMPLES,TUI}.md` with distinct
-    jobs. Worked examples point at the real recipe files (single source of
-    truth, no duplication).
+12. **Doc structure — resolved: split done.** The single 850-line root
+    `SPEC.md` is now a shim to `docs/{architecture,spec,plan,examples,tui}.md`
+    with distinct jobs. Worked examples point at the real recipe files
+    (single source of truth, no duplication).

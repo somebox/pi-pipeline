@@ -288,29 +288,45 @@ test("probe (real file) parses, validates, and compiles with workspace", () => {
 test("docs-audit (real file) parses, validates, and compiles with workspace", () => {
 	const raw = loadRecipeFile("docs-audit");
 	const plan = buildPlanFromRecipe({ raw, nameFallback: "docs-audit" });
-	assert.equal(plan.steps.length, 5);
+	assert.equal(plan.steps.length, 8, `expected 8 steps, got ${plan.steps.length}`);
 
 	const errors = validatePlanTargets(plan);
 	assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
 
 	const { tmp, ws } = mkWs();
 	const chain = compileRecipeToChain(plan, ws);
-	assert.equal(chain.length, 5);
+	assert.equal(chain.length, 8);
 
-	// Step 1: JSON singleton target
-	assert.ok(chain[0].output.endsWith("targets/inventory.json"), `step 1 output: ${chain[0].output}`);
-	assert.equal(chain[0].as, "inventory");
+	// Step 1: repo_standards.json (singleton, JSON)
+	assert.ok(chain[0].output.endsWith("targets/repo_standards.json"), `step 1 output: ${chain[0].output}`);
+	assert.equal(chain[0].as, "repo_standards");
 
-	// Step 2: reads inventory singleton, writes reorg_plan singleton
-	assert.ok(chain[1].output.endsWith("targets/reorg_plan.md"), `step 2 output: ${chain[1].output}`);
+	// Step 2: inventory.json (singleton, JSON)
+	assert.ok(chain[1].output.endsWith("targets/inventory.json"), `step 2 output: ${chain[1].output}`);
+	assert.equal(chain[1].as, "inventory");
 
-	// Step 3: iterate over inventory, writes log collection
+	// Step 3: iterate over inventory, writes analysis collection
 	assert.equal(chain[2].expand.from.output, "inventory");
-	assert.ok(chain[2].parallel.output.includes("collections/log/"), `step 3 collection: ${chain[2].parallel.output}`);
-	assert.equal(chain[2].collect.as, "log");
+	assert.ok(chain[2].parallel.output.includes("collections/analysis/"), `step 3 collection: ${chain[2].parallel.output}`);
+	assert.equal(chain[2].collect.as, "analysis");
 
-	// Step 4: reads reorg_plan and log collection, writes link_status
-	assert.ok(chain[3].output.endsWith("targets/link_status.md"), `step 4 output: ${chain[3].output}`);
+	// Step 4: subject_index singleton (markdown)
+	assert.ok(chain[3].output.endsWith("targets/subject_index.md"), `step 4 output: ${chain[3].output}`);
+
+	// Step 5: reorg_plan.json (singleton, JSON) — the iteration handle for step 6
+	assert.ok(chain[4].output.endsWith("targets/reorg_plan.json"), `step 5 output: ${chain[4].output}`);
+	assert.equal(chain[4].as, "reorg_plan");
+
+	// Step 6: iterate over reorg_plan (phases as items), writes phase_log collection
+	assert.equal(chain[5].expand.from.output, "reorg_plan");
+	assert.ok(chain[5].parallel.output.includes("collections/phase_log/"), `step 6 collection: ${chain[5].parallel.output}`);
+	assert.equal(chain[5].collect.as, "phase_log");
+
+	// Step 7: link_status singleton (markdown)
+	assert.ok(chain[6].output.endsWith("targets/link_status.md"), `step 7 output: ${chain[6].output}`);
+
+	// Step 8: summary singleton (markdown)
+	assert.ok(chain[7].output.endsWith("targets/summary.md"), `step 8 output: ${chain[7].output}`);
 
 	cleanup(tmp);
 });

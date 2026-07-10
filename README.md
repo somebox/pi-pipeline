@@ -3,12 +3,12 @@
 Multi-agent pipelines for pi. Define a pipeline as a **markdown recipe** (a numbered checklist with agent/profile annotations) and run it over anything iterable (files, screenshots, ideas, bug reports) with focused, bounded subagents and small context by construction.
 
 For detailed design, grammar, and next steps, see the documentation in `docs/`:
-- [Architecture & Design Principles](docs/ARCHITECTURE.md) — Why we build pipelines, profiles/agents, execution models, and context-isolation design.
-- [Specification / Recipe Format](docs/SPEC.md) — The normative spec for writing pipeline markdown files, header syntax, variables, and resolution rules.
-- [Project Roadmap (PLAN)](docs/PLAN.md) — Status, implementation stages (Phases 1–6), resolved questions, and open challenges.
-- [Worked Examples](docs/EXAMPLES.md) — Real-world pipeline recipes like `code-quality` and `verify-source` with walk-throughs.
-- [Artifacts](docs/ARTIFACTS.md) — How steps name, store, and hand off outputs: the directory model, named outputs, and skill-based delivery.
-- [TUI & Dashboards](docs/TUI.md) — User interface design for list views, pre-run confirmations, and live run dashboards.
+- [Architecture & Design Principles](docs/architecture.md) — Why we build pipelines, profiles/agents, execution models, and context-isolation design.
+- [Specification / Recipe Format](docs/spec.md) — The normative spec for writing pipeline markdown files, header syntax, variables, and resolution rules.
+- [Project Roadmap (PLAN)](docs/plan.md) — Status, implementation stages (Phases 1–6), resolved questions, and open challenges.
+- [Worked Examples](docs/examples.md) — Real-world pipeline recipes like `code-quality` and `verify-source` with walk-throughs.
+- [Artifacts](docs/artifacts.md) — How steps name, store, and hand off outputs: the directory model, named outputs, and skill-based delivery.
+- [TUI & Dashboards](docs/tui.md) — User interface design for list views, pre-run confirmations, and live run dashboards.
 
 ---
 

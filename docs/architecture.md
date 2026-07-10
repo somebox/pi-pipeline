@@ -1,8 +1,8 @@
 # Architecture
 
 > What pi-pipeline *is*, the model it's built on, and why. The stable big
-> picture. For the recipe grammar see [SPEC.md](SPEC.md); for status and
-> next steps see [PLAN.md](PLAN.md).
+> picture. For the recipe grammar see [spec.md](spec.md); for status and
+> next steps see [plan.md](plan.md).
 
 ## Goal
 
@@ -32,7 +32,7 @@ accumulated 188k tokens, then 400'd on a model-limit mismatch — see
 
 1. **Prose first.** A pipeline is a numbered checklist with agent
    annotations. The user's hand-written `code-quality` (see
-   [EXAMPLES.md](EXAMPLES.md)) is the source of truth — if the format can't
+   [examples.md](examples.md)) is the source of truth — if the format can't
    express that, the format is wrong.
 2. **A profile is just an agent.** No separate "cost class" concept. The
    package ships a roster of agents (`dev`, `util`, `research`, `high`, and
@@ -66,9 +66,10 @@ accumulated 188k tokens, then 400'd on a model-limit mismatch — see
    judgment (a `coordinator` agent). The parent LLM doesn't write per-unit
    tasks (it paraphrases and drops instructions — observed in the first
    `code-quality` run). When judgment is needed, a `coordinator` writes a
-   prompt *template* as its deliverable; the orchestrator substitutes `{unit}`
-   and dispatches. The template is the contract. (See **Enumeration is two
-   concerns** in SPEC.md.)
+   prompt *template* as its deliverable when recipe prose alone is not enough;
+   the orchestrator substitutes `{unit}` and dispatches. The template is an
+   optional contract, not a requirement for every iteration. (See **Enumeration
+   is two concerns** in [spec.md](spec.md).)
 7. **Preview before you spend.** A rich overview TUI gates every run: the
    resolved plan, the agent→model mapping, the estimated cost. Confirm, edit
    inputs, or cancel.
@@ -128,7 +129,7 @@ Every iteration step has three phases:
    cases (a glob, a directory listing) this is **mechanical** — no agent
    call. For judgment cases ("generate 8 ideas", "match screenshots to
    cards") an agent produces the list. The deliverable is `<name>.json`, not
-   prose. (See "Enumeration is two concerns" in SPEC.md.)
+   prose. (See "Enumeration is two concerns" in [spec.md](spec.md).)
 2. **Map** — the orchestrator spawns **one bounded subagent per unit**. Each
    subagent receives: the unit itself, a slim shared onboarding (prepared
    once: the card list, the repo standards, etc.), and the **per-unit prompt
@@ -193,7 +194,7 @@ found:
 `@tintinweb/pi-subagents` is a thin wrapper over pi's first-party SDK — the
 same package we already declare as a peerDependency. Owning the dispatcher
 depends on the SDK directly, eliminating the third-party extension as a
-variable. See [ARTIFACTS.md](ARTIFACTS.md) §Relationship to pi-subagents
+variable. See [artifacts.md](artifacts.md) §Relationship to pi-subagents
 runtime for the full rationale.
 
 ### The runtime contract
@@ -220,10 +221,12 @@ isolation in iterate steps comes from the worker pool (`Promise.all` over a
 bounded number of in-flight dispatches); per-unit errors are caught and
 recorded in the manifest as `failed` with the error string.
 
-The coordinator profile and the per-unit prompt template are no longer
-needed. The parent LLM no longer rewrites per-unit tasks, so there's no
-paraphrase drift to defend against. Recipes carry the full task text as
-prose; the dispatcher injects paths and dispatches verbatim.
+The coordinator profile and a separate per-unit prompt template are no longer
+mandatory for ordinary iteration. The parent LLM no longer rewrites per-unit
+tasks, so there's no paraphrase drift to defend against. Recipes carry the
+full task text as prose; the dispatcher injects paths and dispatches verbatim.
+Use `coordinator` only when judgment-heavy enumeration or a reviewer-visible
+prompt template is valuable.
 
 ## Profiles
 
@@ -235,7 +238,7 @@ A **profile** is a named agent. The package ships five:
 | `util` | Mechanical work: finding files, summarizing, running tests. |
 | `research` | Review, debugging, documentation, consolidation. |
 | `high` | High-level model for software architecture, planning, judgment. |
-| `coordinator` | Authors the per-unit prompt template for complex iteration (opt-in; see "Enumeration is two concerns" in SPEC.md). |
+| `coordinator` | Authors the per-unit prompt template for complex iteration (opt-in; see "Enumeration is two concerns" in [spec.md](spec.md)). |
 
 - Each profile is an `.md` file in `agents/` (e.g. `agents/dev.md`) with a
   `description:` in frontmatter. Adding a profile = adding an agent file.

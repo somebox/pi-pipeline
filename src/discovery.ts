@@ -110,20 +110,21 @@ export function discoverRecipes(opts: {
  *                                                              (gitRoot = ~/.pi/agent/git)
  * Unknown/missing dirs are silently skipped.
  */
-export function resolvePackagePipelineDirs(
+function resolvePackageSubdirs(
 	packages: string[],
 	npmRoot: string,
 	gitRoot: string,
+	subdir: string,
 	settingsDir?: string,
 ): string[] {
 	const out: string[] = [];
 	const seen = new Set<string>();
 	const add = (pkgDir: string) => {
-		const pipelinesDir = path.join(pkgDir, "pipelines");
-		if (seen.has(pipelinesDir)) return;
-		if (fs.existsSync(pipelinesDir)) {
-			seen.add(pipelinesDir);
-			out.push(pipelinesDir);
+		const candidate = path.join(pkgDir, subdir);
+		if (seen.has(candidate)) return;
+		if (fs.existsSync(candidate)) {
+			seen.add(candidate);
+			out.push(candidate);
 		}
 	};
 	for (const src of packages) {
@@ -149,4 +150,22 @@ export function resolvePackagePipelineDirs(
 		}
 	}
 	return out;
+}
+
+export function resolvePackagePipelineDirs(
+	packages: string[],
+	npmRoot: string,
+	gitRoot: string,
+	settingsDir?: string,
+): string[] {
+	return resolvePackageSubdirs(packages, npmRoot, gitRoot, "pipelines", settingsDir);
+}
+
+export function resolvePackageAgentDirs(
+	packages: string[],
+	npmRoot: string,
+	gitRoot: string,
+	settingsDir?: string,
+): string[] {
+	return resolvePackageSubdirs(packages, npmRoot, gitRoot, "agents", settingsDir);
 }

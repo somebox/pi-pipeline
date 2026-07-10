@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { scanPipelinesDir, findProjectPipelineDirs, discoverRecipes, resolvePackagePipelineDirs } from "../src/discovery.ts";
+import { scanPipelinesDir, findProjectPipelineDirs, discoverRecipes, resolvePackagePipelineDirs, resolvePackageAgentDirs } from "../src/discovery.ts";
 
 function mkdir(d: string): string {
 	fs.mkdirSync(d, { recursive: true });
@@ -109,6 +109,26 @@ test("resolvePackagePipelineDirs: npm, git, and local-path sources", () => {
 	assert.ok(dirs.some((d) => d.endsWith("some-pkg/pipelines")));
 	assert.ok(dirs.some((d) => d.endsWith("repo/pipelines")));
 	assert.ok(dirs.some((d) => d.endsWith("local-pkg/pipelines")));
+});
+
+test("resolvePackageAgentDirs: resolves package agent dirs", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "disc-"));
+	const npmRoot = mkdir(path.join(root, "npm"));
+	const gitRoot = mkdir(path.join(root, "git"));
+	const localPkg = mkdir(path.join(root, "local-pkg"));
+	write(path.join(npmRoot, "some-pkg", "agents", "util.md"), "---\nname: util\n---\n");
+	write(path.join(gitRoot, "github.com", "owner", "repo", "agents", "dev.md"), "---\nname: dev\n---\n");
+	write(path.join(localPkg, "agents", "high.md"), "---\nname: high\n---\n");
+	const dirs = resolvePackageAgentDirs(
+		["npm:some-pkg", "git:github.com/owner/repo", localPkg],
+		npmRoot,
+		gitRoot,
+	);
+	assert.equal(dirs.length, 3);
+	assert.ok(dirs.some((d) => d.endsWith("some-pkg/agents")));
+	assert.ok(dirs.some((d) => d.endsWith("repo/agents")));
+	assert.ok(dirs.some((d) => d.endsWith("local-pkg/agents")));
+	fs.rmSync(root, { recursive: true, force: true });
 });
 
 test("resolvePackagePipelineDirs: relative path resolves against settingsDir, not cwd", () => {
