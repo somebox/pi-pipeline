@@ -361,7 +361,7 @@ Minimum shape:
   "run_id": "code-quality-20260704-034a4b",
   "recipe": "code-quality",
   "started_at": "2026-07-04T15:31:10Z",
-  "project_dir": "/Users/foz/src/example",
+  "project_dir": "<project_dir>",
   "workspace_dir": ".pi/run/code-quality-20260704-034a4b",
   "steps": [
     {

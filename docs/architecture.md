@@ -16,11 +16,6 @@ than by asking the model to self-limit. The pipeline tool executes the plan
 itself (no parent-LLM orchestration), so there's no paraphrase drift to
 defend against.
 
-The whole loop (define → discover → preview → run → watch → share) needs no
-TypeScript: a pipeline is a markdown recipe. The runtime enforces small
-per-unit context *by structure* — bounded agents that can't explore — rather
-than by asking the model to self-limit.
-
 This supersedes the earlier "recipe as a fixed checklist with parallel
 fan-out" framing. Checklists are still supported, but iteration is the
 first-class model and the answer to the context-bloat problem that broke
@@ -247,8 +242,6 @@ A **profile** is a named agent. The package ships five:
   To reduce first-run friction, the package ships sane zero-config model
   defaults per profile; the overview TUI's "Edit profiles" is the first-run
   setup wizard (pick models for any unbound profiles before the first run).
-- Recipes reference agents by name. Any agent (built-in or custom) can be
-  referenced; the overview TUI validates that referenced agents are configured.
 - **Cost classes (`$`/`$$`/`$$$`) are dropped.** The plan shows agent names
   and real resolved models, not abstract cost symbols. The cost shape line
   becomes `1 util + 2 dev + 3 research + 1 high` — more honest. Real costs

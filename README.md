@@ -15,10 +15,10 @@ For detailed design, grammar, and next steps, see the documentation in `docs/`:
 ## What it is
 
 This package provides:
-1. **A `pipeline` tool** — The LLM calls this with a recipe name and inputs. It returns a structured plan which the LLM executes using its existing `subagent` tools.
+1. **A `pipeline` tool** — The LLM calls this with a recipe name and inputs. For named recipes it previews the plan (optionally via confirm) and runs the steps itself via the owned dispatcher; dry-run returns the plan only.
 2. **A `/pipeline` slash command** — Run a specific recipe directly (`/pipeline <recipe> <task>`) or invoke a generic fallback pipeline (`/pipeline <task>`).
 3. **Utility slash commands** — `/pipelines` to browse installed recipes, `/pipeline-costs` for a per-step model cost rollup, and `/pipeline-audit` for detailed diagnostic and error-cascade analysis.
-4. **Profiles** — `dev`, `util`, `research`, `high`, and (planned) `coordinator` — mapped to real models in `settings.json`.
+4. **Profiles** — `dev`, `util`, `research`, `high`, and `coordinator` — mapped to real models in `settings.json`.
 
 ---
 
@@ -70,7 +70,7 @@ Add the recommended agent overrides and fallback models to your `~/.pi/agent/set
 
 ---
 
-## Model limits (Why does my subagent error with 400 Context Length?)
+## Model limits
 
 If a subagent fails with a `400: maximum context length` warning even on tiny inputs, it's caused by pi requesting the model's absolute maximum output length (such as 512,000 tokens for `minimax/minimax-m3`), leaving no room for the input context. 
 
@@ -94,4 +94,4 @@ To fix this, put these model overrides in `~/.pi/agent/models.json` (create the 
   }
 }
 ```
-Verify the limits are pick up by running `pi --list-models`.
+Verify the limits are picked up by running `pi --list-models`.

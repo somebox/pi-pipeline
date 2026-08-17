@@ -2,7 +2,7 @@
 
 > What's done, what's next, and what's still open. Living roadmap. For the
 > *what/why* see [architecture.md](architecture.md); for the format see
-> [spec.md](spec.md).
+> [spec.md](spec.md). For versioned history see [CHANGELOG.md](../CHANGELOG.md).
 
 ## Implementation phasing
 

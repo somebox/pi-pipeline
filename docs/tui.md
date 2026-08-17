@@ -50,8 +50,7 @@ available.
 > LLM calls the tool; the tool blocks on user confirmation). Pi supports
 > interactive tools (`ctx.ui.confirm`/`select`). A *rich* scrollable TUI via
 > `ctx.ui.custom()` inside a tool handler needs verification — if it doesn't
-> work cleanly, v1 ships as a `confirm` with a rendered text block, and the
-> rich TUI follows once the API is confirmed.
+> work cleanly, the initial implementation uses a `confirm` with a rendered text block. The rich TUI can be added later once the API is confirmed.
 
 ## 3. Dashboard view (during/after run)
 
@@ -129,8 +128,7 @@ For partially-failed iterate steps, the user can select an entry marked `✗`, p
 
 > **Coexistence note:** during a run the LLM is emitting tool calls into the
 > message stream. The dashboard is a full-screen view you toggle into; the
-> stream continues behind. v1 may ship as a `setWidget` strip (always-visible
-> one-line status + cost) with the full dashboard as v2, if full-screen
+> stream continues behind. The initial implementation may use a `setWidget` strip (always-visible one-line status + cost), with the full dashboard added later if full-screen
 > coexistence proves fiddly.
 
 ## `/pipeline-costs` is removed

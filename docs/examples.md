@@ -69,9 +69,9 @@ single-step recipe used to sanity-check the now-deprecated `maxTools` soft
 budget against an unbounded run — kept as a regression fixture, not a
 template to copy for new recipes.
 
-### `screenshot-worklog` — planned iteration over non-files, with a coordinator
+### `screenshot-worklog` — planned iteration over non-files, with a coordinator *(not yet shipped)*
 
-File: `pipelines/screenshot-worklog.md` *(planned; not currently shipped)*
+File: `pipelines/screenshot-worklog.md` *(planned for future release; reference only)*
 
 The richer iteration case: for every screenshot in `~/screenshots`, look for
 commits after it, match to a card/feature, review the image, attach to the
@@ -118,7 +118,7 @@ recipe and edit. The three shapes above cover the common cases:
 
 - **Fixed checklist** → copy `verify-source` (simplest) or `code-quality` (multi-step).
 - **Iteration over files** → copy `summarize-files` and change the glob + the per-unit task.
-- **Iteration over non-files / judgment enumeration** → start from the planned `screenshot-worklog` shape and change the enumerate logic + per-unit prompt.
+- **Iteration over non-files / judgment enumeration** → use the `screenshot-worklog` reference shape (not yet shipped) and change the enumerate logic + per-unit prompt.
 
 See [spec.md](spec.md) for the full grammar (frontmatter, step header flags,
 placeholders, inference rules).

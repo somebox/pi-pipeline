@@ -58,10 +58,11 @@ A `# <name>` H1 (title, ignored) followed by numbered
   false`) and neither has a `tools` field, so a per-step override is rejected
   outright by the tool call schema. Real enforcement is agent-level only: pick
   an agent (or add a bounded variant, e.g. `dev-bounded.md`) whose own
-  `tools:` frontmatter matches what you want. See [architecture.md](architecture.md)
-  principle #5 and [plan.md](plan.md) open question #5.
+  `tools:` frontmatter matches what you want. See architecture.md
+  design principle **Context isolation by construction**, and plan.md
+  resolved question **tools= per-step override** (agent-level only).
 
-  **Agent `tools:` gotcha:** any agent with an explicit `tools:` allowlist
+  **Agent tools gotcha:** any agent with an explicit `tools:` allowlist
   must include `structured_output`, or every step with `outputSchema` routed
   to it fails with "Missing structured_output call" — `--tools` allowlists
   built-in, extension, *and* dynamically-registered tools, and
