@@ -20,6 +20,7 @@ import {
 	inferEffort, inferMode, normalizeModel, fmtTokens, fmtCost,
 	summarizeCost, buildPlan, mapResultEntry, rollupByModel, renderCostReport, renderAuditReport,
 	loadTierModels, loadModelFallbackOverrides, fallbacksFor, isTierAgent,
+	DEFAULT_MODEL_FALLBACKS,
 	injectTierModels, buildCostStep, newReport,
 	toRunMetrics, metricsByModel, metricsTotalCost, metricsTotalDurationMs,
 	classifyFailure, isContextOverflow, failureLabel,
@@ -181,14 +182,14 @@ test("loadTierModels: overrides win, defaults otherwise", () => {
 	const m = loadTierModels(f);
 	assert.equal(m.util, "openrouter/kimi/kimi-k2.7");
 	assert.equal(m.high, "openrouter/anthropic/claude-opus-4");
-	assert.equal(m.research, "openrouter/z-ai/glm-5.2"); // default, not overridden
+	assert.equal(m.research, "openrouter/z-ai/glm-5.3"); // default, not overridden
 });
 
 test("loadTierModels: missing file -> defaults, no throw", () => {
 	const m = loadTierModels(path.join(os.tmpdir(), "does-not-exist-" + Date.now() + ".json"));
 	assert.equal(m.util, "openrouter/minimax/minimax-m3");
-	assert.equal(m.research, "openrouter/z-ai/glm-5.2");
-	assert.equal(m.high, "openrouter/anthropic/claude-sonnet-5");
+	assert.equal(m.research, "openrouter/z-ai/glm-5.3");
+	assert.equal(m.high, "openrouter/~anthropic/claude-sonnet-latest");
 });
 
 test("loadModelFallbackOverrides + fallbacksFor: override by class", () => {
@@ -202,7 +203,11 @@ test("loadModelFallbackOverrides + fallbacksFor: override by class", () => {
 	// Unknown primary -> undefined (no chain injected).
 	assert.equal(fallbacksFor("some/unknown-model", f), undefined);
 	// Default class (utility) unaffected by the coding-only override.
-	assert.deepEqual(fallbacksFor("minimax/minimax-m3", f), ["minimax/minimax-m3", "moonshotai/kimi-k2.7-code"]);
+	assert.deepEqual(fallbacksFor("minimax/minimax-m3", f), [
+		"minimax/minimax-m3",
+		"qwen/qwen3.8-27b",
+		"~deepseek/deepseek-v4-flash-latest",
+	]);
 });
 
 test("loadModelFallbackOverrides: memoized per filePath", () => {
@@ -210,6 +215,15 @@ test("loadModelFallbackOverrides: memoized per filePath", () => {
 	const a = loadModelFallbackOverrides(f);
 	const b = loadModelFallbackOverrides(f);
 	assert.equal(a, b, "same object reference (cached)");
+});
+
+test("DEFAULT_MODEL_FALLBACKS: each class ≤3 (OpenRouter 'models' cap)", () => {
+	// OpenRouter rejects >3 entries with 400 "'models' array must have 3 items or fewer."
+	// Regression guard: if a future default grows past the cap, the injector in
+	// extension.ts must already slice — but the defaults themselves should stay honest.
+	for (const [cls, chain] of Object.entries(DEFAULT_MODEL_FALLBACKS)) {
+		assert.ok(chain.length <= 3, `class '${cls}' has ${chain.length} entries: ${JSON.stringify(chain)}`);
+	}
 });
 
 /* ───────────────────────── injectTierModels (the glm-5.2 fix) ───────────────────────── */
@@ -280,7 +294,7 @@ test("DEFAULT_TIER_MODELS binds every standard profile", () => {
 test("injectTierModels: dev profile gets its model injected", () => {
 	const input: any = { agent: "dev", task: "t" };
 	injectTierModels(input, DEFAULT_TIER_MODELS);
-	assert.equal(input.model, "openrouter/moonshotai/kimi-k2.7-code");
+	assert.equal(input.model, "openrouter/qwen/qwen3.8-27b");
 });
 
 test("PlanStep no longer has tier/costClass fields", () => {

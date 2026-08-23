@@ -404,9 +404,9 @@ export const RESEARCH_TEMPLATES: Record<Effort, Plan> = {
  * `payload.models` based on which class the current `payload.model`
  * belongs to. The three pipeline tiers map to three fallback classes:
  *
- *   util ($)   → utility : minimax/minimax-m3      → moonshotai/kimi-k2.7-code
- *   research($$)→ coding  : z-ai/glm-5.2            → google/gemini-3.5-flash → qwen/qwen3.7-max
- *   high  ($$$) → stronger: anthropic/claude-sonnet-5 → ~openai/gpt-mini-latest
+ *   util ($)   → utility : minimax/minimax-m3      → qwen/qwen3.8-27b → ~deepseek/deepseek-v4-flash-latest
+ *   research($$)→ coding  : z-ai/glm-5.3            → ~deepseek/deepseek-v4-flash-latest → openai/gpt-5.6-luna-pro
+ *   high  ($$$) → stronger: ~anthropic/claude-sonnet-latest → openai/gpt-5.6-terra-pro → ~anthropic/claude-opus-latest
  *
  * Tunable without editing the package: set `pipeline.modelFallbacks` in
  * ~/.pi/agent/settings.json as `{ "<class>": ["id", ...] }` to override
@@ -419,20 +419,35 @@ export const RESEARCH_TEMPLATES: Record<Effort, Plan> = {
  * opaque to pi and resolved server-side.
  */
 
+// OpenRouter caps the `models` array at 3 entries per request — anything more
+// returns 400 "'models' array must have 3 items or fewer." Keep each class
+// at ≤3. The injector in extension.ts also slices to 3 as defense-in-depth.
 export const DEFAULT_MODEL_FALLBACKS: Record<ModelClass, string[]> = {
-	utility: ["minimax/minimax-m3", "moonshotai/kimi-k2.7-code"],
-	coding: ["z-ai/glm-5.2", "google/gemini-3.5-flash", "qwen/qwen3.7-max"],
-	stronger: ["anthropic/claude-sonnet-5", "~openai/gpt-mini-latest"],
+	utility: ["minimax/minimax-m3", "qwen/qwen3.8-27b", "~deepseek/deepseek-v4-flash-latest"],
+	coding: ["z-ai/glm-5.3", "openai/gpt-5.6-luna-pro", "~deepseek/deepseek-v4-flash-latest"],
+	stronger: ["~anthropic/claude-sonnet-latest", "openai/gpt-5.6-terra-pro", "~anthropic/claude-opus-latest"],
 };
 
 export type ModelClass = "utility" | "coding" | "stronger";
 
 /** Map each known primary model id → its fallback class. */
 export const PRIMARY_TO_CLASS: Record<string, ModelClass> = {
+	// utility / cheap
 	"minimax/minimax-m3": "utility",
-	"moonshotai/kimi-k2.7-code": "utility",   // default dev model
-	"z-ai/glm-5.2": "coding",
-	"anthropic/claude-sonnet-5": "stronger",
+	"qwen/qwen3.8-27b": "utility",
+	"~deepseek/deepseek-v4-flash-latest": "utility",
+	"moonshotai/kimi-k2.7-code": "utility", // legacy default dev
+	// coding / mid
+	"z-ai/glm-5.3": "coding",
+	"z-ai/glm-5.2": "coding", // legacy
+	"openai/gpt-5.6-luna-pro": "coding",
+	"~google/gemini-flash-latest": "coding",
+	// stronger / high
+	"~anthropic/claude-sonnet-latest": "stronger",
+	"anthropic/claude-sonnet-5": "stronger", // legacy
+	"openai/gpt-5.6-terra-pro": "stronger",
+	"~anthropic/claude-opus-latest": "stronger",
+	"openai/gpt-5.6-sol": "stronger",
 };
 
 /** Read ~/.pi/agent/settings.json -> pipeline.modelFallbacks, best-effort.
@@ -493,10 +508,10 @@ export function fallbacksFor(modelId: string | undefined, filePath: string = DEF
  */
 
 export const DEFAULT_TIER_MODELS: Record<Profile, string> = {
-	dev: "openrouter/moonshotai/kimi-k2.7-code",
+	dev: "openrouter/qwen/qwen3.8-27b",
 	util: "openrouter/minimax/minimax-m3",
-	research: "openrouter/z-ai/glm-5.2",
-	high: "openrouter/anthropic/claude-sonnet-5",
+	research: "openrouter/z-ai/glm-5.3",
+	high: "openrouter/~anthropic/claude-sonnet-latest",
 };
 
 /** Read the tier→model map from the live ~/.pi/agent/settings.json
