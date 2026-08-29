@@ -517,10 +517,9 @@ export async function dispatchIterate(
 
 /* ──────────────────────── task composition ──────────────────────── */
 
-function composeTask(step: PlanStep, ws: WorkspaceInfo): string {
+export function composeTask(step: PlanStep, ws: WorkspaceInfo): string {
 	const lines: string[] = [];
-	const stepSlug = step.phase.toLowerCase().replace(/[^a-z0-9_]+/g, "_");
-	const tempDir = path.join(ws.tempRoot, stepSlug);
+	const tempDir = ws.scratchRoot;
 	lines.push(`Use the scratch directory ${tempDir} for any temporary files you create.`);
 	lines.push(`Do not write your main output there; use the output path specified below.`);
 	lines.push("");
@@ -544,11 +543,10 @@ function composeTask(step: PlanStep, ws: WorkspaceInfo): string {
 	return lines.join("\n");
 }
 
-function composeIterateTask(step: PlanStep, ws: WorkspaceInfo, unit: IterateUnit): string {
+export function composeIterateTask(step: PlanStep, ws: WorkspaceInfo, unit: IterateUnit): string {
 	const lines: string[] = [];
-	const stepSlug = step.phase.toLowerCase().replace(/[^a-z0-9_]+/g, "_");
 	const unitKey = (unit.path ?? unit.id ?? "unit") as string;
-	const tempDir = path.join(ws.tempRoot, stepSlug, unitKey);
+	const tempDir = path.join(ws.scratchRoot, ...String(unitKey).split(/[\\/]+/).filter(Boolean));
 	lines.push(`Use the scratch directory ${tempDir} for any temporary files you create.`);
 	lines.push(`Do not write your main output there; use the output path specified below.`);
 	if (step.outputs && step.outputs[0]?.kind === "collection") {
@@ -570,7 +568,7 @@ function composeIterateTask(step: PlanStep, ws: WorkspaceInfo, unit: IterateUnit
 
 function resolveOutputAbs(t: { scheme: string; rawPath?: string; name: string; ext: string }, ws: WorkspaceInfo): string {
 	if (t.scheme === "work") return path.join(ws.targetsDir, `${t.name}.${t.ext}`);
-	if (t.scheme === "temp") return path.join(ws.tempRoot, t.rawPath ?? `${t.name}.${t.ext}`);
+	if (t.scheme === "temp") return path.join(ws.scratchRoot, t.rawPath ?? `${t.name}.${t.ext}`);
 	if (t.scheme === "project") return path.resolve(t.rawPath ?? t.name);
 	return t.rawPath ?? t.name;
 }
@@ -746,6 +744,7 @@ export function recordStepResult(
 		agent: existing?.agent ?? "",
 		status: result.status,
 		attempts: (existing?.attempts ?? 0) + 1,
+		durationMs: result.durationMs,
 		usage: {
 			input: result.usage.input,
 			output: result.usage.output,
@@ -754,7 +753,7 @@ export function recordStepResult(
 			cost: result.usage.cost,
 		},
 	};
-	if (result.error) (step as any).error = result.error;
+	if (result.error) step.error = result.error;
 	if (result.units) {
 		const name = collectionName ?? stepId;
 		step.outputs = [{

@@ -54,6 +54,7 @@ import {
 	renderAuditReport,
 	renderStepAudit,
 	STATIC_STATUS,
+	copyToClipboard,
 } from "./lib.ts";
 import { buildPlanFromRecipe, validatePlanTargets } from "./recipes.ts";
 import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs, resolvePackageAgentDirs } from "./discovery.ts";
@@ -64,19 +65,38 @@ import {
 	buildManifestStep,
 	recordStepResult,
 	loadUnits,
-	collectCollection,
+	composeTask,
 } from "./dispatcher.ts";
-import type { StepResult, StepUsage, AgentProfile, IterateUnit } from "./dispatcher.ts";
+import type { StepResult, StepUsage, IterateUnit } from "./dispatcher.ts";
 import {
-	mintRunId,
 	createWorkspace,
 	writeManifestShell,
 	updateManifestStep,
 	finalizeManifest,
-	cleanupRuns,
-	loadArtifactsConfig,
+	hashRecipe,
+	gitHead,
+	bootstrapGitignore,
+	enforceFullWorkspaceCap,
+	listRuns,
+	findRun,
+	latestIncomplete,
+	pruneToReport,
+	clearScratch,
+	cleanScratchTrees,
+	pruneLeftoverCompleted,
+	pruneIncompleteToReport,
+	cleanAllRuns,
+	patchManifest,
 } from "./workspace.ts";
 import type { WorkspaceInfo, ManifestStep } from "./workspace.ts";
+import {
+	writeRunReadme,
+	writeMetrics,
+	writeStepLog,
+	writeRootIndex,
+	userFacingSummary,
+} from "./report.ts";
+import { planDelta, recipeHashMismatch, filterUnits } from "./resume.ts";
 
 /* ──────────────────────── discovery helper ────────────────────────
  *
@@ -136,7 +156,6 @@ function discoverAgentDirs(projectDir: string): string[] {
 
 let currentWorkspace: WorkspaceInfo | undefined;
 let lastRunSteps: Array<{ step: ManifestStep; result: StepResult }> = [];
-let currentArtifactsConfig = loadArtifactsConfig();
 
 /* ──────────────────────── plan resolution ────────────────────────
  *
@@ -270,7 +289,7 @@ pi.on("session_start", (_event, ctx) => {
 		ctx.ui.setStatus("pipeline", ctx.ui.theme.fg("dim", STATIC_STATUS));
 	}
 	ctx.ui.notify(
-		"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-costs — cost breakdown of the last run.\n/pipeline-audit — per-step audit (tasks/errors/tool-calls/artifacts).\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
+		"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-runs — list runs in .pi/pipeline/.\n/pipeline-resume [id] — resume an aborted or failed run.\n/pipeline-clean — prune completed workspaces; --failed / --all.\n/pipeline-costs — cost breakdown of the last run.\n/pipeline-audit — per-step audit (tasks/errors/tool-calls/artifacts).\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
 		"info",
 	);
 });
@@ -347,11 +366,60 @@ pi.on("before_provider_request", (event) => {
 						"If true, show an interactive confirmation with the rendered plan before executing a named recipe. Cancelling returns the plan without dispatching.",
 				}),
 			),
+			resume: Type.Optional(
+				Type.String({
+					description:
+						'Run id or unique prefix to resume. Pass "latest" to resume the newest incomplete run in .pi/pipeline/. Recipe and inputs are loaded from the run manifest.',
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string>; review?: boolean };
+			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string>; review?: boolean; resume?: string };
+			const projectDir = ctx.cwd || process.cwd();
 			const wantsReview = p.review === true || (p.hints ?? []).some((h) => /\b(review|confirm|approve|ask)\b/i.test(h));
+
+			let resumeWs: WorkspaceInfo | undefined;
+			if (!p.dryRun && p.resume !== undefined) {
+				const token = (p.resume ?? "").trim();
+				if (!token || token === "latest") {
+					resumeWs = latestIncomplete(projectDir) ?? undefined;
+					if (!resumeWs) {
+						return {
+							content: [{ type: "text" as const, text: "No incomplete pipeline run found under `.pi/pipeline/`.\n" }],
+							details: pipelineDetails({ effort: "standard", mode: "research", summary: "", steps: [] }, undefined, true),
+						};
+					}
+				} else {
+					const found = findRun(projectDir, token);
+					if ("error" in found) {
+						return {
+							content: [{ type: "text" as const, text: `**Error:** ${found.error}\n` }],
+							details: pipelineDetails({ effort: "standard", mode: "research", summary: "", steps: [] }, undefined, true),
+						};
+					}
+					resumeWs = found.ws;
+				}
+				try {
+					const man = JSON.parse(fs.readFileSync(resumeWs.manifestPath, "utf-8"));
+					if (!p.pipeline) p.pipeline = man.recipe;
+					else if (p.pipeline !== man.recipe) {
+						return {
+							content: [{ type: "text" as const, text: `**Error:** Resume run is recipe "${man.recipe}" but pipeline="${p.pipeline}" was requested.\n` }],
+							details: pipelineDetails({ effort: "standard", mode: "research", summary: "", steps: [] }, p.pipeline, true),
+						};
+					}
+					if (!p.inputs && man.inputs) p.inputs = man.inputs;
+					if (!p.task && man.task) p.task = man.task;
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{ type: "text" as const, text: `**Error:** Could not read run manifest: ${msg}\n` }],
+						details: pipelineDetails({ effort: "standard", mode: "research", summary: "", steps: [] }, undefined, true),
+					};
+				}
+			}
+
 			const resolved = resolvePlan(p);
 			const plan = resolved.plan;
 			const effectiveTask = p.task ?? (resolved.name ?? "(unnamed)");
@@ -368,8 +436,11 @@ pi.on("before_provider_request", (event) => {
 			// Reset per-op run state
 			lastRunSteps = [];
 
-			// Dry run: return the plan only, no execution, no workspace
+			// Dry run / generic path: return the plan only, no execution, no workspace
 			if (p.dryRun || !resolved.name) {
+				if (!resolved.name && !p.dryRun) {
+					text += "\n\nIf you write intermediate files while executing this generic plan, put them in `.pi/pipeline/scratch/` (wiped by `/pipeline-clean`).";
+				}
 				return {
 					content: [{ type: "text" as const, text }],
 					details: pipelineDetails(plan, resolved.name, p.dryRun ?? false),
@@ -391,22 +462,47 @@ pi.on("before_provider_request", (event) => {
 				}
 			}
 
-			// Named, non-dryRun recipe: create workspace, dispatch each step, finalize.
-			const projectDir = ctx.cwd || process.cwd();
-			cleanupRuns(projectDir, currentArtifactsConfig);
-			currentWorkspace = createWorkspace(projectDir, resolved.name, currentArtifactsConfig);
-			writeManifestShell(currentWorkspace, resolved.name, projectDir);
+			// Named, non-dryRun recipe: create or reopen workspace, dispatch, finalize.
+			const recipeFile = availableRecipes.find((r) => r.name === resolved.name);
+			const recipeRaw = recipeFile?.raw ?? "";
+			if (resumeWs) {
+				try {
+					const man = JSON.parse(fs.readFileSync(resumeWs.manifestPath, "utf-8"));
+					const drift = recipeHashMismatch(man, recipeRaw);
+					if (drift) {
+						return {
+							content: [{ type: "text" as const, text: `**Error:** ${drift}\n` }],
+							details: pipelineDetails(plan, resolved.name, true),
+						};
+					}
+				} catch { /* opened below */ }
+				currentWorkspace = resumeWs;
+				try {
+					patchManifest(currentWorkspace, { finalized_at: undefined, status: "running" });
+				} catch { /* best effort */ }
+			} else {
+				try { bootstrapGitignore(projectDir); } catch { /* best effort */ }
+				enforceFullWorkspaceCap(projectDir);
+				currentWorkspace = createWorkspace(projectDir, resolved.name);
+				writeManifestShell(currentWorkspace, resolved.name, projectDir, {
+					task: effectiveTask,
+					inputs: p.inputs,
+					recipeHash: recipeRaw ? hashRecipe(recipeRaw) : undefined,
+					gitHead: gitHead(projectDir),
+				});
+			}
 
-			// Pre-populate manifest with pending step shells (so /pipeline-audit
-			// shows structure even before the first dispatch lands).
+			const resumeDelta = resumeWs ? planDelta(plan, JSON.parse(fs.readFileSync(currentWorkspace.manifestPath, "utf-8")), currentWorkspace) : undefined;
+
+			// Pre-populate manifest with pending step shells on a fresh run.
 			const manifestStepIds: string[] = [];
 			for (const step of plan.steps) {
 				const ms = buildManifestStep(step, currentWorkspace);
 				manifestStepIds.push(ms.id);
-				// Re-use the dispatcher helper for the initial write
-				// (it calls updateManifestStep, which overwrites by id).
-				updateManifestStep(currentWorkspace, ms);
+				if (!resumeWs) updateManifestStep(currentWorkspace, ms);
 			}
+			writeRunReadme(currentWorkspace, plan);
+			writeRootIndex(projectDir, listRuns(projectDir));
 
 			// Set up the dispatch context. The SDK is dynamically imported to
 			// keep this module importable in test contexts where the SDK is
@@ -424,36 +520,6 @@ pi.on("before_provider_request", (event) => {
 
 			const agentDirs = discoverAgentDirs(projectDir);
 
-			// Helper: build a cost-tracker-compatible step entry from a result
-			const stepEntry = (stepId: string, phase: string, agent: string, task: string, result: StepResult) => {
-				const e: any = {
-					stepIndex: lastRunSteps.length + 1,
-					mode: stepId === phase ? "single" : "single",
-					agent,
-					task: task.slice(0, 80),
-					results: [{
-						agent,
-						model: "(dispatcher)",
-						task,
-						exitCode: result.status === "completed" ? 0 : 1,
-						error: result.error,
-						usage: {
-							input: result.usage.input,
-							output: result.usage.output,
-							cacheRead: result.usage.cacheRead,
-							cacheWrite: result.usage.cacheWrite,
-							cost: result.usage.cost,
-							turns: result.usage.turns,
-						},
-						durationMs: result.durationMs,
-						toolCount: 0,
-						finalOutput: result.text,
-						attempts: [],
-					}],
-				};
-				return e;
-			};
-
 			let aborted = false;
 			const abortListener = () => {
 				aborted = true;
@@ -470,6 +536,8 @@ pi.on("before_provider_request", (event) => {
 				}
 				const step = plan.steps[i]!;
 				const stepId = manifestStepIds[i]!;
+				const delta = resumeDelta?.[i];
+				if (delta?.action === "skip") continue;
 
 				// Update status to running
 				const runningMs = buildManifestStep(step, currentWorkspace);
@@ -500,6 +568,9 @@ pi.on("before_provider_request", (event) => {
 				let units: IterateUnit[] | undefined;
 				if (step.iterate) {
 					units = loadUnits(currentWorkspace, step.iterate, projectDir);
+					if (delta?.action === "retry-units" && delta.unitKeys) {
+						units = filterUnits(units, delta.unitKeys);
+					}
 					if (units.length === 0) {
 						const expected = path.join(currentWorkspace.targetsDir, `${step.iterate}.json`);
 						const err = `Iterate step "${step.phase}" references "${step.iterate}" but no unit list was found. Expected ${expected} to contain either { "items": [...] } or a bare array.`;
@@ -534,6 +605,13 @@ pi.on("before_provider_request", (event) => {
 				// Update manifest with the real result
 				recordStepResult(currentWorkspace, stepId, result, step.outputs?.[0]?.name);
 				lastRunSteps.push({ step: runningMs, result });
+				try {
+					const man = JSON.parse(fs.readFileSync(currentWorkspace.manifestPath, "utf-8"));
+					const logged = man.steps?.find((s: ManifestStep) => s.id === stepId) as ManifestStep | undefined;
+					if (logged) writeStepLog(currentWorkspace, i + 1, logged, composeTask(step, currentWorkspace), result.text);
+				} catch { /* best effort */ }
+				writeRunReadme(currentWorkspace, plan);
+				if (result.status === "completed") clearScratch(currentWorkspace.scratchRoot);
 
 				// Stop the run on first failure (mirrors the old "subsequent steps blocked" behavior)
 				if (result.status === "failed") {
@@ -543,28 +621,36 @@ pi.on("before_provider_request", (event) => {
 			}
 
 			if (aborted || signal.aborted) {
-				// Mark not-yet-started steps as blocked so the manifest reflects an
-				// intentional interruption rather than a completed run with pending rows.
-				for (const stepId of manifestStepIds) {
+				for (const sid of manifestStepIds) {
 					try {
 						const manifest = JSON.parse(fs.readFileSync(currentWorkspace.manifestPath, "utf-8"));
-						const ms = manifest.steps?.find((s: ManifestStep) => s.id === stepId) as ManifestStep | undefined;
-						if (ms && (ms.status === "pending" || ms.status === "running")) {
-							ms.status = "blocked";
-							updateManifestStep(currentWorkspace, ms);
-						}
+						const ms = manifest.steps?.find((s: ManifestStep) => s.id === sid) as ManifestStep | undefined;
+						if (!ms) continue;
+						if (ms.status === "running") ms.status = "aborted";
+						else if (ms.status === "pending") ms.status = "blocked";
+						else continue;
+						updateManifestStep(currentWorkspace, ms);
 					} catch { /* best effort */ }
 				}
 			}
 			signal.removeEventListener("abort", abortListener);
 
-			// Finalize the manifest (derives overall status from step statuses)
-			try { finalizeManifest(currentWorkspace, aborted || signal.aborted ? "failed" : undefined); } catch { /* best effort */ }
+			let finalized: ReturnType<typeof finalizeManifest> | undefined;
+			try {
+				finalized = finalizeManifest(currentWorkspace, aborted || signal.aborted ? "aborted" : undefined);
+			} catch { /* best effort */ }
+			let metrics;
+			try { metrics = writeMetrics(currentWorkspace, finalized); } catch { /* best effort */ }
+			writeRunReadme(currentWorkspace, plan);
+			if (finalized?.status === "completed") {
+				try { pruneToReport(currentWorkspace); } catch { /* best effort */ }
+			}
+			writeRootIndex(projectDir, listRuns(projectDir));
 			if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", STATIC_STATUS);
 
-			// Build a cost report from the dispatched steps
 			const costReport = buildCostReport(plan, resolved.name, lastRunSteps, false);
 			text += "\n\n### Execution summary\n";
+			if (metrics) text += userFacingSummary(currentWorkspace, metrics) + "\n\n";
 			text += renderCostReport(costReport).lines.join("\n");
 
 			return {
@@ -767,6 +853,60 @@ pi.on("before_provider_request", (event) => {
 			} else if (ctx?.ui?.notify) {
 				ctx.ui.notify(lines.join("\n"), "info");
 			}
+		},
+	});
+
+	pi.registerCommand("pipeline-runs", {
+		description: "List pipeline runs in .pi/pipeline/ (newest first).",
+		handler: async (_args, ctx) => {
+			const cwd = ctx.cwd || process.cwd();
+			const runs = listRuns(cwd);
+			const lines = runs.length === 0
+				? ["No runs in .pi/pipeline/ yet."]
+				: runs.map((r) => {
+					const st = r.status ?? (r.pruned ? "completed" : "running");
+					const cost = r.cost != null ? ` · $${r.cost.toFixed(4)}` : "";
+					return `${r.runId}  ${st}  ${r.recipe ?? "?"}${cost}`;
+				});
+			if (ctx?.ui?.select) await ctx.ui.select("Pipeline runs", lines);
+			else ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("pipeline-resume", {
+		description: "Resume the newest incomplete run, or /pipeline-resume <run-id>.",
+		handler: async (args, ctx) => {
+			const id = args.trim();
+			await pi.sendUserMessage(
+				id
+					? `Use the pipeline tool with resume="${id}". Do not start a new run. Report the run path, status, and totals when it finishes.`
+					: `Use the pipeline tool with resume="latest" to resume the newest incomplete run in .pi/pipeline/. Do not start a new run. Report the run path, status, and totals when it finishes.`,
+			);
+		},
+	});
+
+	pi.registerCommand("pipeline-clean", {
+		description: "Prune completed run workspaces to README+metrics. --failed also prunes incomplete runs; --all deletes .pi/pipeline/.",
+		handler: async (args, ctx) => {
+			const cwd = ctx.cwd || process.cwd();
+			const tokens = args.trim().split(/\s+/).filter(Boolean);
+			const all = tokens.includes("--all");
+			const failed = tokens.includes("--failed");
+			let msg: string;
+			if (all) {
+				cleanAllRuns(cwd);
+				writeRootIndex(cwd, []);
+				msg = "Deleted .pi/pipeline/. It will be recreated on the next run.";
+			} else {
+				const nDone = pruneLeftoverCompleted(cwd);
+				const nFail = failed ? pruneIncompleteToReport(cwd) : 0;
+				cleanScratchTrees(cwd);
+				writeRootIndex(cwd, listRuns(cwd));
+				msg = failed
+					? `Pruned ${nDone} completed and ${nFail} incomplete run(s) to README+metrics; scratch cleared.`
+					: `Pruned ${nDone} completed run(s) to README+metrics; scratch cleared. Pass --failed to also collapse aborted/failed runs.`;
+			}
+			ctx.ui.notify(msg, "info");
 		},
 	});
 }

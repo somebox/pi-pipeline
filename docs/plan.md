@@ -7,8 +7,9 @@
 ## Implementation phasing
 
 Shipped in slices — each phase is independently useful. **Phases 1 and 2
-(recipes, profiles, metrics, and iteration via compile-to-chain) are done and
-verified live against a real repo; the next big lever is the overview TUI.**
+(recipes, profiles, metrics, and iteration) plus owned dispatch and flat
+`.pi/pipeline/` run artifacts (resume/clean) are done; the next big lever is
+the overview TUI.**
 
 **Phase 1 — Recipes + profiles + metrics (DONE).**
 - `agents/dev.md`; dropped `costClass`/`tier` → `agent`.

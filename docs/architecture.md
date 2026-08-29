@@ -153,8 +153,8 @@ as naturally as for files (summarize each file → merge).
 a dry-run), the tool's `execute` method:
 
 1. Resolves the plan from the recipe
-2. Creates a run workspace (`.pi/run/<run_id>/targets/`, `collections/`,
-   `logs/`, `temp/`) and a manifest shell
+2. Creates a run workspace (`.pi/pipeline/<YYYY-MM-DD-HHMMSS-recipe>/` with
+   `targets/`, `collections/`, `logs/`, `scratch/`) and a manifest shell
 3. For each step, spawns a child `AgentSession` via pi's first-party SDK
    (`createAgentSession` from `@earendil-works/pi-coding-agent`), prompting
    it with the composed task text (workspace paths resolved, temp dir

@@ -394,7 +394,7 @@ function resolveTargetPath(target: TargetSpec, ws: WorkspaceInfo): string {
 		return path.join(ws.targetsDir, `${target.name}.${target.ext}`);
 	}
 	if (target.scheme === "temp") {
-		return path.join(ws.tempRoot, target.rawPath ?? `${target.name}.${target.ext}`);
+		return path.join(ws.scratchRoot, target.rawPath ?? `${target.name}.${target.ext}`);
 	}
 	if (target.scheme === "project") {
 		return path.resolve(target.rawPath ?? target.name);
@@ -435,8 +435,7 @@ export function compileRecipeToChain(plan: Plan, _ws?: WorkspaceInfo): any[] {
 
 		// Stage 3: inject temp/scratch directory when workspace is available.
 		if (_ws) {
-			const stepSlug = slugifyAs(step.phase);
-			const tempDir = path.join(_ws.tempRoot, stepSlug);
+			const tempDir = _ws.scratchRoot;
 			resolvedTask = `Use the scratch directory ${tempDir} for any temporary files you create. ` +
 				`Do not write your main output there; use the output path specified below.\n\n${resolvedTask}`;
 		}

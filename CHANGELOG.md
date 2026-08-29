@@ -4,18 +4,27 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] — 2026-08-29
 
 ### Added
+- Flat per-run folders under `.pi/pipeline/<YYYY-MM-DD-HHMMSS-recipe>/` with a live `README.md` log, `metrics.json`, `targets/`, `collections/`, `logs/`, and purgeable `scratch/`.
+- Mechanical end-of-run summary (no extra model call): status, step table, totals, optional recipe `summary`/`report` target embedded in the run README. Always reported to the user with path + cost + time.
+- `/pipeline-runs`, `/pipeline-resume [id]`, `/pipeline-clean` (`--failed`, `--all`). Pipeline tool `resume` param (`latest` or a run id/prefix). `planDelta` skips completed steps and retries only failed iterate units.
+- Best-effort `.gitignore` bootstrap for `.pi/pipeline/` when the project file exists and does not already ignore `.pi/`.
+
 - Package agent discovery (`resolvePackageAgentDirs`) and `loadAgentProfileFromDirs`, so recipes can use a package's bundled agents when the target repo has no local `agents/` directory (project/user still override).
 - Dispatcher persists missing singleton/collection outputs from the agent's final response when the tool profile can't write files, validates required JSON outputs after a step, and surfaces named singleton `targets` on `StepResult` / the manifest.
 - `pipeline` tool `review` flag (and review-ish hints) opens an interactive confirm before dispatching a named recipe; cancel returns the plan with no steps run.
-- Abort handling: mid-run interrupt marks pending/running steps `blocked` and leaves remaining steps unstarted; per-session abort signals stop the active subagent session.
+- Abort handling: mid-run interrupt marks the current step `aborted` and later steps `blocked`; per-session abort signals stop the active subagent session.
 
 ### Changed
+- Run artifacts moved from `.pi/run/<recipe>-<date>-<hex>/` to `.pi/pipeline/<YYYY-MM-DD-HHMMSS-recipe>/`. Successful runs prune immediately to README + metrics. Scratch is always project-local (`scratch/`), never a configurable external temp root.
 - `docs-audit` recipe expanded to an 8-step flow: discover standards → inventory with git metadata → per-file analysis → subject index → phased reorg plan → execute per phase → fix links/frontmatter → changelog + summary.
 - Documentation housekeeping: lowercase docs paths (`docs/architecture.md` etc.), link fixes, and small stale-status cleanups.
 - Manifest step recording preserves prior phase/agent/outputs and increments `attempts` across retries.
+
+### Removed
+- `pipeline.artifacts` settings (`root`, `retain_runs`, `retain_logs`, `temp_root`, `max_retained_runs`). No migration of existing `.pi/run/` folders.
 
 ## 0.5.0 — 2026-07-04
 

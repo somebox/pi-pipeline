@@ -17,7 +17,9 @@ For detailed design, grammar, and next steps, see the documentation in `docs/`:
 This package provides:
 1. **A `pipeline` tool** — The LLM calls this with a recipe name and inputs. For named recipes it previews the plan (optionally via confirm) and runs the steps itself via the owned dispatcher; dry-run returns the plan only.
 2. **A `/pipeline` slash command** — Run a specific recipe directly (`/pipeline <recipe> <task>`) or invoke a generic fallback pipeline (`/pipeline <task>`).
-3. **Utility slash commands** — `/pipelines` to browse installed recipes, `/pipeline-costs` for a per-step model cost rollup, and `/pipeline-audit` for detailed diagnostic and error-cascade analysis.
+3. **Utility slash commands** — `/pipelines` to browse installed recipes, `/pipeline-runs` to list runs in `.pi/pipeline/`, `/pipeline-resume [id]` to continue an aborted or failed run, `/pipeline-clean` to prune workspaces to the summary+metrics, `/pipeline-costs` for a per-step model cost rollup, and `/pipeline-audit` for detailed diagnostic and error-cascade analysis.
+
+Named recipe runs live in `.pi/pipeline/<YYYY-MM-DD-HHMMSS-recipe>/`. Open that folder's `README.md` for status, the step log, time, and cost. Successful runs keep only `README.md` and `metrics.json`.
 4. **Profiles** — `dev`, `util`, `research`, `high`, and `coordinator` — mapped to real models in `settings.json`.
 
 ---

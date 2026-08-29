@@ -11,14 +11,14 @@ The canonical roadmap and current phase status live in [plan.md](plan.md).
 This file keeps implementation notes for the artifact/workspace layer; avoid
 using the snapshot below as a release checklist.
 
-| Stage | Status at 2026-07-05 snapshot | Notes |
+| Stage | Status | Notes |
 |---|---|---|
-| 1 — workspace + manifest | Done | `src/workspace.ts` + extension hooks; mint/cleanup/retention functional |
-| 2 — target syntax | Done | `TargetSpec`/`parseOutputSpec`/`validatePlanTargets` + workspace-aware compiler; golden fixture passes |
-| 3 — temp lifecycle | Done (per-run) | Per-step scratch dirs created + injected into task text; per-step teardown becomes trivial once dispatch is owned |
+| 1 — workspace + manifest | Done | Flat `.pi/pipeline/<date>-<recipe>/` run folders; README + metrics |
+| 2 — target syntax | Done | `TargetSpec`/`parseOutputSpec`/`validatePlanTargets` + workspace-aware compiler |
+| 3 — temp lifecycle | Done | Per-run `scratch/` (iterate: `scratch/<unit>/`); wiped after a successful step |
 | 4 — recipe migration | Partial | `summarize-files`, `probe`, `docs-audit` migrated; `code-quality`/`verify-source`/`housekeeping` still legacy |
-| **D — own dispatch** | **Next** | Drop `@tintinweb/pi-subagents`; dispatch subagents via pi's first-party `createAgentSession` SDK |
-| 5 — resume/retry | Not started | Far simpler once dispatch is owned (we control the loop) |
+| D — own dispatch | Done | Pipeline tool dispatches via pi's first-party `createAgentSession` SDK |
+| 5 — resume/retry | Done | `resume` tool param, `/pipeline-resume`, `planDelta`; `/pipeline-clean` |
 | 6 — external delivery | Not started | Deferred until a real recipe needs it |
 
 **Pivot (decisive):** the review confirmed `@tintinweb/pi-subagents` is a
@@ -109,29 +109,29 @@ not drive the core build model.
 
 ### Run workspace
 
-Every pipeline run gets a workspace:
+Every dispatcher-executed run gets **one flat folder** under the project:
 
 ```text
-.pi/run/<run_id>/
-  manifest.json
-  targets/          # singleton targets: <name>.md / <name>.json
-  collections/      # fan-out: <name>/<per-unit files> + <name>.json index
-  logs/
-  temp/
+.pi/pipeline/
+  README.md                              # index of runs (newest first)
+  scratch/                               # generic/plan-only leftovers
+  2026-07-19-142355-code-quality/        # one folder per run; name sorts by time
+    README.md                            # live human log; this IS the summary
+    metrics.json                         # written at finalize; kept after prune
+    manifest.json                        # present while the workspace is kept
+    targets/                             # singleton named outputs
+    collections/<name>/                  # fan-out outputs
+    logs/01-scope.md                     # one markdown file per step
+    scratch/                             # purgeable; per-unit subdirs during iterate
 ```
 
-Singleton targets are files in `targets/`. A fan-out collection `<name>`
-owns a directory `collections/<name>/` holding the per-unit files (the
-declared pattern, e.g. `summary-{unit.path}.md`, resolved per unit) plus an
-index file `collections/<name>.json` recording each unit's status — the
-index is what the manifest and future retry read.
+On **success** the run folder is immediately pruned to `README.md` + `metrics.json`.
+Failed, partial, and aborted runs keep the full workspace so `/pipeline-resume` works.
 
-`<run_id>` should be unique and readable, e.g.
-`code-quality-20260704-034a4b`.
+`<run_id>` is `YYYY-MM-DD-HHMMSS-<recipe-slug>` (UTC). Same-second collisions append `-2`.
 
-The workspace is the pipeline's build directory. It is equivalent in spirit to
-GitHub Actions' workspace plus step outputs, or a `make` build dir. The repo
-itself remains the source tree.
+The repo itself remains the source tree. `.pi/pipeline/` is gitignored (best-effort
+bootstrap if the project `.gitignore` exists and does not already ignore `.pi/`).
 
 ### Three locations, but only one default
 
@@ -151,7 +151,7 @@ output=summary
 means:
 
 ```text
-.pi/run/<run_id>/targets/summary.md
+.pi/pipeline/<run_id>/targets/summary.md
 ```
 
 For JSON targets:
@@ -163,7 +163,7 @@ output=scope:json
 means:
 
 ```text
-.pi/run/<run_id>/targets/scope.json
+.pi/pipeline/<run_id>/targets/scope.json
 ```
 
 A recipe only reaches for a scheme when it is leaving the normal build target
@@ -429,30 +429,11 @@ not just nicer paths; they are the basis for a resumable pipeline.
 
 Global settings, under the existing `pipeline` key:
 
-```json
-{
-  "pipeline": {
-    "artifacts": {
-      "root": ".pi/run",
-      "retain_runs": "failed",
-      "retain_logs": "always",
-      "temp_root": null,
-      "max_retained_runs": 20
-    }
-  }
-}
-```
-
-Meanings:
-
-- `root`: where run workspaces live. Relative paths resolve from
-  `project_dir`.
-- `retain_runs`: `never` | `failed` | `always`. Default: `failed`.
-- `retain_logs`: `never` | `failed` | `always`. Default: `always`, because
-  subagent session JSONL is already useful for `/pipeline-audit`.
-- `temp_root`: `null` means `<run_dir>/temp`; an absolute path can point to
-  OS temp or a faster scratch disk.
-- `max_retained_runs`: best-effort cleanup cap per project.
+No artifact config is required. Root is always `.pi/pipeline/`. Successful runs
+prune themselves to `README.md` + `metrics.json`. Incomplete runs keep the full
+workspace. `/pipeline-clean` (optional `--failed` / `--all`) is the commit-time
+sweep. A safety cap prunes the oldest **full** workspaces down to reports if more
+than 20 accumulate. Existing `.pi/run/` folders are not migrated.
 
 Per-recipe frontmatter can override retention only:
 
@@ -1014,9 +995,7 @@ Trello/GitHub/Jira recipe exists.
    a per-step flag the dispatcher can honor directly.
 2. **Concurrency cap.** `max_concurrency` for iterate fan-out (default ~4).
    Config under `pipeline.dispatch`. Replaces the old `maxItems` chain field.
-3. **Run cleanup UX.** `/pipeline-runs`, `/pipeline-clean`,
-   `/pipeline-resume` commands. Out of scope until Stage 5; the manifest
-   shape already anticipates them.
+3. **Run cleanup UX.** Done: `/pipeline-runs`, `/pipeline-clean`, `/pipeline-resume`.
 4. **Reduce-step input size.** **Dissolved by own-dispatch:** the reduce
    step reads collection files by absolute path and selects as it goes — no
    `{outputs.*}` substitution, no inflation. Revisit only if a future

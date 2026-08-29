@@ -24,7 +24,7 @@ import {
 	type AgentProfile,
 	type StepResult,
 } from "../src/dispatcher.ts";
-import { createWorkspace, loadArtifactsConfig, writeManifestShell, updateManifestStep } from "../src/workspace.ts";
+import { createWorkspace, writeManifestShell, updateManifestStep } from "../src/workspace.ts";
 import { buildPlanFromRecipe } from "../src/recipes.ts";
 
 /* ─────────── parseAgentFrontmatter ─────────── */
@@ -200,7 +200,7 @@ test("buildManifestStep: produces a pending step from a plan step", () => {
 		nameFallback: "x",
 	});
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-dispatcher-${Date.now()}`);
-	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	const ws = createWorkspace(tmp, "x");
 	const step = plan.steps[0]!;
 	const ms = buildManifestStep(step, ws);
 	assert.equal(ms.id, "enumerate");
@@ -216,7 +216,7 @@ test("buildManifestStep: produces a pending step from a plan step", () => {
 
 test("recordStepResult: updates manifest with real statuses", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-dispatcher-${Date.now()}`);
-	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	const ws = createWorkspace(tmp, "x");
 	writeManifestShell(ws, "x", tmp);
 	const result: StepResult = {
 		status: "completed",
@@ -235,7 +235,7 @@ test("recordStepResult: updates manifest with real statuses", () => {
 
 test("recordStepResult: preserves manifest outputs and stores parsed targets", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-dispatcher-${Date.now()}`);
-	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	const ws = createWorkspace(tmp, "x");
 	writeManifestShell(ws, "x", tmp);
 	const plan = buildPlanFromRecipe({
 		raw: "---\nname: x\n---\n# x\n\n## 1. Plan  (high, output=reorg_plan:json)\nWrite a plan.",
@@ -263,7 +263,7 @@ test("recordStepResult: preserves manifest outputs and stores parsed targets", (
 
 test("loadUnits: reads target JSON from workspace targets/", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-loadunits-${Date.now()}`);
-	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	const ws = createWorkspace(tmp, "x");
 	fs.writeFileSync(path.join(ws.targetsDir, "scope.json"), JSON.stringify({
 		items: [{ path: "src/a.ts" }, { path: "src/b.ts" }],
 	}));
@@ -278,7 +278,7 @@ test("loadUnits: falls back to cwd for legacy recipes", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-loadunits-${Date.now()}`);
 	const cwd = path.join(tmp, "cwd");
 	fs.mkdirSync(cwd, { recursive: true });
-	const ws = createWorkspace(path.join(tmp, "ws"), "x", loadArtifactsConfig());
+	const ws = createWorkspace(path.join(tmp, "ws"), "x");
 	fs.writeFileSync(path.join(cwd, "scope-files.json"), JSON.stringify([
 		{ path: "src/legacy.ts" },
 	]));
@@ -290,14 +290,14 @@ test("loadUnits: falls back to cwd for legacy recipes", () => {
 
 test("loadUnits: returns empty array when no file found", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-loadunits-${Date.now()}`);
-	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	const ws = createWorkspace(tmp, "x");
 	assert.deepEqual(loadUnits(ws, "nope"), []);
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 test("collectCollection: lists per-unit output paths in sorted order", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-collect-${Date.now()}`);
-	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	const ws = createWorkspace(tmp, "x");
 	const colDir = path.join(ws.collectionsDir, "summary");
 	fs.mkdirSync(colDir, { recursive: true });
 	fs.writeFileSync(path.join(colDir, "src-b.ts.md"), "b");
@@ -325,7 +325,7 @@ test("composeIterateTask: collection path strips double extension", () => {
 
 test("recordStepResult: partial iterate result carries units[]", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-dispatcher-${Date.now()}`);
-	const ws = createWorkspace(tmp, "x", loadArtifactsConfig());
+	const ws = createWorkspace(tmp, "x");
 	writeManifestShell(ws, "x", tmp);
 	const result: StepResult = {
 		status: "partial",

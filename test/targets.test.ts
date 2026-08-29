@@ -16,7 +16,7 @@ import {
 	compileRecipeToChain,
 } from "../src/recipes.ts";
 import type { TargetSpec } from "../src/recipes.ts";
-import { createWorkspace, loadArtifactsConfig } from "../src/workspace.ts";
+import { createWorkspace } from "../src/workspace.ts";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -24,8 +24,7 @@ import fs from "node:fs";
 /* ─── helpers ─── */
 function mkWs() {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-stage2-${Date.now()}`);
-	const cfg = { ...loadArtifactsConfig(), root: ".tmp/run" };
-	const ws = createWorkspace(tmp, "summarize-files", cfg);
+	const ws = createWorkspace(tmp, "summarize-files");
 	return { tmp, ws };
 }
 function cleanup(tmp: string) {
