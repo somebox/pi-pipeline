@@ -98,3 +98,18 @@ To fix this, put these model overrides in `~/.pi/agent/models.json` (create the 
 }
 ```
 Verify the limits are picked up by running `pi --list-models`.
+
+## Model configuration
+
+The canonical profile-to-model mapping is in [`config/models.json`](config/models.json).
+It covers both pi-pipeline profiles and the generic `pi-subagents` agents
+(`reviewer`, `oracle`, `scout`, and others). Generate explicit entries in
+`~/.pi/agent/settings.json` with:
+
+```bash
+npm run sync-models
+```
+
+The script preserves unrelated settings and existing fallback models. Use
+`npm run check-models` to check for drift without writing the settings file.
+If you change a model mapping, run `/reload` in pi before starting new agents.

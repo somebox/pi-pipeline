@@ -1,0 +1,22 @@
+{
+  "models": {
+    "low": "openrouter/qwen/qwen3.8-27b",
+    "coding-low": "openrouter/openai/gpt-5.6-luna",
+    "medium": "openrouter/google/gemini-3.7-flash",
+    "high": "openrouter/z-ai/glm-5.3"
+  },
+  "agents": {
+    "dev": "coding-low",
+    "util": "low",
+    "research": "medium",
+    "high": "high",
+    "scout": "low",
+    "worker": "low",
+    "delegate": "low",
+    "researcher": "medium",
+    "context-builder": "medium",
+    "reviewer": "high",
+    "oracle": "high",
+    "planner": "high"
+  }
+}
