@@ -156,6 +156,8 @@ export interface DispatchOpts {
 	modelRegistry: any;
 	authStorage: any;
 	concurrency?: number;       // iterate fan-out cap; default 4
+	/** Pi config directory containing auth.json/models.json. */
+	configDir?: string;
 	abortSignal?: AbortSignal;
 	onProgress?: (progress: PipelineProgress) => void;
 }
@@ -273,6 +275,7 @@ interface SessionOpts {
 	task: string;
 	projectDir: string;
 	agentsDir: string;
+	configDir?: string;
 	modelRegistry: any;
 	authStorage: any;
 	abortSignal?: AbortSignal;
@@ -287,6 +290,10 @@ export async function createStepSession(opts: SessionOpts): Promise<{ session: a
 	const { createAgentSession, SessionManager, DefaultResourceLoader } = sdk as any;
 	const model = resolveProfileModel(opts.profile, opts.agentsDir, opts.modelRegistry);
 	if (!model) throw new Error(`No model resolved for agent "${opts.profile.name}"`);
+	// `agentsDir` locates the selected profile file. `configDir` is separate:
+	// current pi derives auth.json/models.json from createAgentSession's
+	// `agentDir`, so passing a package's agents/ directory loses auth.
+	const configDir = opts.configDir ?? path.join(process.env.HOME ?? process.cwd(), ".pi", "agent");
 
 	const tools: string[] | undefined = opts.profile.tools && opts.profile.tools.length > 0
 		? opts.profile.tools
@@ -301,7 +308,7 @@ export async function createStepSession(opts: SessionOpts): Promise<{ session: a
 	// (e.g. `structured_output` was never registered).
 	const loader = new DefaultResourceLoader({
 		cwd: opts.projectDir,
-		agentDir: opts.agentsDir,
+		agentDir: configDir,
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
@@ -314,7 +321,7 @@ export async function createStepSession(opts: SessionOpts): Promise<{ session: a
 
 	const { session } = await createAgentSession({
 		cwd: opts.projectDir,
-		agentDir: opts.agentsDir,
+		agentDir: configDir,
 		model,
 		tools,
 		authStorage: opts.authStorage,
@@ -372,6 +379,7 @@ export async function dispatchStep(
 		task,
 		projectDir: opts.projectDir,
 		agentsDir: opts.agentsDir,
+		configDir: opts.configDir,
 		modelRegistry: opts.modelRegistry,
 		authStorage: opts.authStorage,
 		abortSignal: opts.abortSignal,
@@ -458,6 +466,7 @@ export async function dispatchIterate(
 				task,
 				projectDir: opts.projectDir,
 				agentsDir: opts.agentsDir,
+				configDir: opts.configDir,
 				modelRegistry: opts.modelRegistry,
 				authStorage: opts.authStorage,
 				abortSignal: opts.abortSignal,

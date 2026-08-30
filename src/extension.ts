@@ -758,6 +758,7 @@ pi.on("before_provider_request", (event) => {
 					const opts = {
 						projectDir,
 						agentsDir: loaded.agentsDir,
+						configDir: path.join(os.homedir(), ".pi", "agent"),
 						modelRegistry,
 						authStorage,
 						abortSignal: sig,
