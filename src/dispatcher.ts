@@ -15,7 +15,7 @@ import path from "node:path";
 import { loadTierModels } from "./lib.ts";
 import type { PlanStep } from "./lib.ts";
 import type { WorkspaceInfo } from "./workspace.ts";
-import { updateManifestStep, type ManifestStep, type ManifestUnitEntry } from "./workspace.ts";
+import { readManifest, updateManifestStep, type ManifestStep, type ManifestUnitEntry } from "./workspace.ts";
 
 /* ──────────────────────── agent profile ──────────────────────── */
 
@@ -134,6 +134,19 @@ export interface StepResult {
 	targets?: Record<string, unknown>;
 }
 
+export interface PipelineProgress {
+	kind: "step-text" | "unit-start" | "unit-complete" | "unit-failed" | "step-complete";
+	phase: string;
+	agent: string;
+	unitKey?: string;
+	completed?: number;
+	failed?: number;
+	running?: number;
+	total?: number;
+	elapsedMs?: number;
+	text?: string;
+}
+
 export interface DispatchOpts {
 	projectDir: string;
 	agentsDir: string;
@@ -144,7 +157,7 @@ export interface DispatchOpts {
 	authStorage: any;
 	concurrency?: number;       // iterate fan-out cap; default 4
 	abortSignal?: AbortSignal;
-	onProgress?: (text: string) => void; // streamed partial text
+	onProgress?: (progress: PipelineProgress) => void;
 }
 
 /* ──────────────────────── helpers ──────────────────────── */
@@ -263,7 +276,7 @@ interface SessionOpts {
 	modelRegistry: any;
 	authStorage: any;
 	abortSignal?: AbortSignal;
-	onProgress?: (text: string) => void;
+	onTextProgress?: (text: string) => void;
 	unitId?: string;
 }
 
@@ -316,12 +329,12 @@ export async function createStepSession(opts: SessionOpts): Promise<{ session: a
 		catch { /* non-fatal */ }
 	}
 
-	if (opts.onProgress) {
+	if (opts.onTextProgress) {
 		let buffer = "";
 		session.subscribe((event: any) => {
 			if (event?.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
 				buffer += event.assistantMessageEvent.delta ?? "";
-				opts.onProgress!(buffer);
+				opts.onTextProgress!(buffer);
 			}
 		});
 	}
@@ -362,7 +375,9 @@ export async function dispatchStep(
 		modelRegistry: opts.modelRegistry,
 		authStorage: opts.authStorage,
 		abortSignal: opts.abortSignal,
-		onProgress: opts.onProgress,
+		onTextProgress: opts.onProgress
+		? (text: string) => opts.onProgress!({ kind: "step-text", phase: step.phase, agent: step.agent, text })
+		: undefined,
 	});
 	try {
 		await session.prompt(task);
@@ -420,22 +435,37 @@ export async function dispatchIterate(
 		error?: string; usage?: StepUsage; durationMs?: number;
 	} | undefined> = new Array(total);
 
+	const emit = (progress: Omit<PipelineProgress, "phase" | "agent">) => {
+		opts.onProgress?.({ phase: step.phase, agent: step.agent, ...progress });
+	};
+	const counts = () => {
+		const completed = results.filter((r) => r?.status === "completed").length;
+		const failed = results.filter((r) => r?.status === "failed").length;
+		return { completed, failed, running: total - completed - failed, total };
+	};
+
 	async function runOne(i: number) {
 		const unit = units[i]!;
 		const key = (unit.path ?? unit.id ?? `unit-${i}`) as string;
 		const task = composeIterateTask(step, ws, unit);
 		const slotStart = Date.now();
-		const { session, dispose } = await createStepSession({
-			profile,
-			task,
-			projectDir: opts.projectDir,
-			agentsDir: opts.agentsDir,
-			modelRegistry: opts.modelRegistry,
-			authStorage: opts.authStorage,
-			abortSignal: opts.abortSignal,
-			unitId: key,
-		});
+		let session: any;
+		let dispose = () => {};
+		emit({ kind: "unit-start", unitKey: key, ...counts(), elapsedMs: Date.now() - start });
 		try {
+			({ session, dispose } = await createStepSession({
+				profile,
+				task,
+				projectDir: opts.projectDir,
+				agentsDir: opts.agentsDir,
+				modelRegistry: opts.modelRegistry,
+				authStorage: opts.authStorage,
+				abortSignal: opts.abortSignal,
+				unitId: key,
+				onTextProgress: opts.onProgress
+					? (text: string) => opts.onProgress!({ kind: "step-text", phase: step.phase, agent: step.agent, unitKey: key, text, ...counts(), elapsedMs: Date.now() - start })
+					: undefined,
+			}));
 			await session.prompt(task);
 			const messages = session.messages ?? [];
 			const { usage, hadError, hadAborted } = extractUsageAndStatus(messages);
@@ -468,6 +498,7 @@ export async function dispatchIterate(
 				}
 			}
 			results[i] = r;
+			emit({ kind: r.status === "completed" ? "unit-complete" : "unit-failed", unitKey: key, ...counts(), elapsedMs: Date.now() - start, text: r.error });
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			results[i] = {
@@ -477,6 +508,7 @@ export async function dispatchIterate(
 				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 				durationMs: Date.now() - slotStart,
 			};
+			emit({ kind: "unit-failed", unitKey: key, ...counts(), elapsedMs: Date.now() - start, text: msg });
 		} finally {
 			dispose();
 		}
@@ -521,11 +553,13 @@ export async function dispatchIterate(
 		if (r?.durationMs !== undefined) e.durationMs = r.durationMs;
 		return e;
 	});
+	const durationMs = Date.now() - start;
+	opts.onProgress?.({ kind: "step-complete", phase: step.phase, agent: step.agent, completed, failed, running: 0, total, elapsedMs: durationMs });
 	return {
 		status,
 		text: `${completed}/${total} unit(s) completed`,
 		usage: { input, output, cacheRead, cacheWrite, cost, turns },
-		durationMs: Date.now() - start,
+		durationMs,
 		units: unitsOut,
 	};
 }
@@ -782,6 +816,33 @@ export function collectCollection(ws: WorkspaceInfo, name: string): string[] {
 	} catch {
 		return [];
 	}
+}
+
+/** Persist one completed/failed unit while an iterate step is still running.
+ *  This makes the live run README useful without waiting for the whole fan-out
+ *  to finish. The final recordStepResult call replaces this provisional list
+ *  with the complete result set. */
+export function recordUnitProgress(
+	ws: WorkspaceInfo,
+	stepId: string,
+	entry: ManifestUnitEntry,
+	collectionName?: string,
+): void {
+	const manifest = readManifest(ws.manifestPath);
+	const step = manifest.steps.find((s) => s.id === stepId);
+	if (!step) return;
+	const name = collectionName ?? step.outputs?.[0]?.name ?? stepId;
+	const output = step.outputs?.find((o) => o.name === name) ?? step.outputs?.[0] ?? {
+		name,
+		kind: "collection" as const,
+		path: `collections/${name}/`,
+	};
+	const units = output.units ? [...output.units] : [];
+	const index = units.findIndex((u) => u.key === entry.key);
+	if (index >= 0) units[index] = entry;
+	else units.push(entry);
+	step.outputs = [{ ...output, kind: "collection", path: output.path || `collections/${name}/`, units }];
+	updateManifestStep(ws, step);
 }
 
 export function recordStepResult(

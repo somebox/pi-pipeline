@@ -18,6 +18,7 @@ import {
 	extractUsageAndStatus,
 	extractText,
 	buildManifestStep,
+	recordUnitProgress,
 	recordStepResult,
 	loadUnits,
 	collectCollection,
@@ -336,6 +337,25 @@ test("composeIterateTask: unresolved named reads remain absolute and workspace-s
 	const task = composeIterateTask(plan.steps[0]!, ws, { path: "a" });
 	assert.match(task, new RegExp(path.join(ws.collectionsDir, "missing_collection").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.doesNotMatch(task, /Read from: missing_collection(?:,|\n)/);
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("recordUnitProgress: live completion is visible before iterate finishes", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-live-progress-${Date.now()}`);
+	const ws = createWorkspace(tmp, "x");
+	writeManifestShell(ws, "x", tmp);
+	updateManifestStep(ws, {
+		id: "execute", phase: "Execute", agent: "dev", status: "running",
+		outputs: [{ name: "worklog", kind: "collection", path: "collections/worklog/" }],
+	});
+	recordUnitProgress(ws, "execute", { key: "a", status: "completed" }, "worklog");
+	recordUnitProgress(ws, "execute", { key: "b", status: "failed", error: "timeout" }, "worklog");
+	const manifest = JSON.parse(fs.readFileSync(ws.manifestPath, "utf-8"));
+	assert.deepEqual(manifest.steps[0].outputs[0].units, [
+		{ key: "a", status: "completed" },
+		{ key: "b", status: "failed", error: "timeout" },
+	]);
+	assert.equal(manifest.steps[0].status, "running");
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
 

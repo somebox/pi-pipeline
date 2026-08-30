@@ -64,12 +64,13 @@ function logRow(i: number, s: ManifestStep): string {
 	const dur = fmtDuration(s.durationMs);
 	const cost = s.usage ? fmtCost(s.usage.cost) : "—";
 	let status: string = s.status;
-	if (s.status === "partial") {
-		const units = s.outputs?.[0]?.units;
-		if (units && units.length > 0) {
-			const failed = units.filter((u) => u.status === "failed").length;
-			status = `partial (${failed}/${units.length} failed)`;
-		}
+	const units = s.outputs?.[0]?.units;
+	if (units && units.length > 0 && (s.status === "running" || s.status === "partial")) {
+		const failed = units.filter((u) => u.status === "failed").length;
+		const completed = units.filter((u) => u.status === "completed").length;
+		status = s.status === "running"
+			? `running (${completed}/${units.length} done, ${failed} failed)`
+			: `partial (${failed}/${units.length} failed)`;
 	}
 	return `| ${i + 1} | ${s.phase} | ${s.agent} | ${status} | ${dur} | ${cost} |`;
 }

@@ -68,9 +68,10 @@ import {
 	buildManifestStep,
 	recordStepResult,
 	loadUnits,
+	recordUnitProgress,
 	composeTask,
 } from "./dispatcher.ts";
-import type { StepResult, StepUsage, IterateUnit } from "./dispatcher.ts";
+import type { StepResult, StepUsage, IterateUnit, PipelineProgress } from "./dispatcher.ts";
 import {
 	createWorkspace,
 	writeManifestShell,
@@ -622,6 +623,7 @@ pi.on("before_provider_request", (event) => {
 				modelRegistry = (sdk as any).ModelRegistry.create(authStorage);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
+				if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", `Pipeline failed before starting · ${msg}`);
 				text += `\n\n**Error:** Failed to load pi SDK: ${msg}\n`;
 				return { content: [{ type: "text" as const, text }], details: pipelineDetails(plan, resolved.name, false) };
 			}
@@ -705,17 +707,54 @@ pi.on("before_provider_request", (event) => {
 				// Dispatch (single or iterate)
 				let result: StepResult;
 				try {
+					const startedAt = Date.now();
+					let latestProgress: PipelineProgress | undefined;
+					const showProgress = (progress: PipelineProgress) => {
+						latestProgress = progress;
+						const ws = currentWorkspace;
+						if ((progress.kind === "unit-complete" || progress.kind === "unit-failed") && progress.unitKey && ws) {
+							try {
+								recordUnitProgress(ws, stepId, {
+									key: progress.unitKey,
+									status: progress.kind === "unit-failed" ? "failed" : "completed",
+									error: progress.text,
+								}, step.outputs?.[0]?.name);
+								writeRunReadme(ws, plan);
+							} catch { /* live reporting is best effort */ }
+						}
+						if (progress.kind === "step-text" && progress.text && onUpdate) {
+							onUpdate({ content: [{ type: "text" as const, text: `Step ${i + 1}/${plan.steps.length}: ${step.phase}\n\n${progress.text}` }], details: {} });
+						}
+						if (!ctx.ui?.setStatus) return;
+						const elapsed = Math.round((Date.now() - startedAt) / 1000);
+						if (progress.total !== undefined) {
+							const unit = progress.unitKey ? ` · ${progress.kind === "unit-start" ? "working" : "last"}: ${progress.unitKey}` : "";
+							ctx.ui.setStatus("pipeline", `Step ${i + 1}/${plan.steps.length}: ${step.phase} (${step.agent}) · ${progress.completed ?? 0}/${progress.total} done · ${progress.failed ?? 0} failed · ${elapsed}s${unit}`);
+						}
+					};
+					const heartbeat = setInterval(() => {
+						if (!ctx.ui?.setStatus) return;
+						const elapsed = Math.round((Date.now() - startedAt) / 1000);
+						const suffix = latestProgress?.total !== undefined
+							? ` · ${latestProgress.completed ?? 0}/${latestProgress.total} done · ${latestProgress.failed ?? 0} failed`
+							: "";
+						ctx.ui.setStatus("pipeline", `Step ${i + 1}/${plan.steps.length}: ${step.phase} (${step.agent}) · ${elapsed}s${suffix}`);
+					}, 1000);
 					const opts = {
 						projectDir,
 						agentsDir: loaded.agentsDir,
 						modelRegistry,
 						authStorage,
 						abortSignal: sig,
-						onProgress: onUpdate ? (txt: string) => onUpdate({ content: [{ type: "text" as const, text: txt }], details: {} }) : undefined,
+						onProgress: showProgress,
 					};
-					result = units
-						? await dispatchIterate(step, currentWorkspace, loaded.profile, units, opts)
-						: await dispatchStep(step, currentWorkspace, loaded.profile, opts);
+					try {
+						result = units
+							? await dispatchIterate(step, currentWorkspace, loaded.profile, units, opts)
+							: await dispatchStep(step, currentWorkspace, loaded.profile, opts);
+					} finally {
+						clearInterval(heartbeat);
+					}
 				if (sig.aborted) aborted = true;
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
@@ -748,6 +787,7 @@ pi.on("before_provider_request", (event) => {
 						try { writeMetrics(currentWorkspace, man); } catch { /* best effort */ }
 						writeRunReadme(currentWorkspace, plan);
 						writeRootIndex(projectDir, listRuns(projectDir));
+						if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", `Pipeline paused · checkpoint ${step.checkpoint} · awaiting approval`);
 						text += "\n\n" + renderPausedResult({
 							runId: currentWorkspace.runId,
 							token: step.checkpoint,
@@ -770,6 +810,19 @@ pi.on("before_provider_request", (event) => {
 
 				// Stop the run on first failure (mirrors the old "subsequent steps blocked" behavior)
 				if (result.status === "failed") {
+					if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", `Pipeline failed · step ${i + 1}/${plan.steps.length}: ${step.phase}`);
+					// Make the reason later steps did not run explicit in the durable
+					// run log; only aborts previously marked pending steps blocked.
+					for (const sid of manifestStepIds.slice(i + 1)) {
+						try {
+							const manifest = readManifest(currentWorkspace.manifestPath);
+							const pending = manifest.steps.find((s) => s.id === sid);
+							if (pending?.status === "pending") {
+								pending.status = "blocked";
+								updateManifestStep(currentWorkspace, pending);
+							}
+						} catch { /* best effort */ }
+					}
 					text += `\n\n**Step ${i + 1} failed:** ${result.error ?? "unknown error"}\n`;
 					break;
 				}
@@ -801,7 +854,10 @@ pi.on("before_provider_request", (event) => {
 				try { pruneToReport(currentWorkspace); } catch { /* best effort */ }
 			}
 			writeRootIndex(projectDir, listRuns(projectDir));
-			if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", STATIC_STATUS);
+			if (ctx.ui?.setStatus) {
+				const finalStatus = finalized?.status ?? (aborted || sig.aborted ? "aborted" : "finished");
+				ctx.ui.setStatus("pipeline", `Pipeline ${finalStatus} · ${currentWorkspace.runId}`);
+			}
 
 			const costReport = buildCostReport(plan, resolved.name, lastRunSteps, false);
 			text += "\n\n### Execution summary\n";
