@@ -618,9 +618,24 @@ pi.on("before_provider_request", (event) => {
 			// not resolvable.
 			let authStorage: any, modelRegistry: any;
 			try {
-				const sdk = await import("@earendil-works/pi-coding-agent");
-				authStorage = (sdk as any).AuthStorage.create();
-				modelRegistry = (sdk as any).ModelRegistry.create(authStorage);
+				const sdk = await import("@earendil-works/pi-coding-agent") as any;
+				// The SDK moved from AuthStorage + ModelRegistry.create() to the
+				// ModelRuntime + new ModelRegistry(runtime) API. Support both so a
+				// package update does not make pipeline execution unavailable.
+				if (sdk.AuthStorage?.create && sdk.ModelRegistry?.create) {
+					authStorage = sdk.AuthStorage.create();
+					modelRegistry = sdk.ModelRegistry.create(authStorage);
+				} else if (sdk.ModelRuntime?.create && sdk.ModelRegistry) {
+					const agentDir = path.join(os.homedir(), ".pi", "agent");
+					const runtime = await sdk.ModelRuntime.create({
+						authPath: path.join(agentDir, "auth.json"),
+						modelsPath: path.join(agentDir, "models.json"),
+					});
+					modelRegistry = new sdk.ModelRegistry(runtime);
+					authStorage = undefined;
+				} else {
+					throw new Error("Unsupported pi SDK: no compatible model/auth runtime API");
+				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", `Pipeline failed before starting · ${msg}`);
