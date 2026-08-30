@@ -17,8 +17,6 @@
  */
 
 import { type Plan, type PlanStep, composeStepTask } from "./lib.ts";
-import type { WorkspaceInfo } from "./workspace.ts";
-import path from "node:path";
 
 /** Parsed recipe frontmatter. All fields optional. */
 export interface RecipeFrontmatter {
@@ -188,13 +186,12 @@ export interface ParsedStepHeader {
 	parallel: boolean;
 	reads: string[];
 	output: string | undefined;
-	maxTools: number | undefined;
 	iterate: string | undefined;
-	tools: string[] | undefined;
+	checkpoint: string | undefined;
 }
 
 /** Parse a `(agent, flags)` header tail. Returns null if no parenthesized tail. */
-export function parseStepHeaderTail(tail: string): { agent: string; parallel: boolean; reads: string[]; output: string | undefined; maxTools: number | undefined; iterate: string | undefined; tools: string[] | undefined } | null {
+export function parseStepHeaderTail(tail: string): { agent: string; parallel: boolean; reads: string[]; output: string | undefined; iterate: string | undefined; checkpoint: string | undefined } | null {
 	const m = tail.match(/^\(([^)]*)\)\s*$/);
 	if (!m) return null;
 	const parts = m[1]!.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
@@ -203,22 +200,23 @@ export function parseStepHeaderTail(tail: string): { agent: string; parallel: bo
 	let parallel = false;
 	let reads: string[] = [];
 	let output: string | undefined;
-	let maxTools: number | undefined;
 	let iterate: string | undefined;
-	let tools: string[] | undefined;
+	let checkpoint: string | undefined;
 	for (let i = 1; i < parts.length; i++) {
 		const p = parts[i]!;
 		if (p === "parallel") parallel = true;
 		else if (p.startsWith("reads=")) reads = p.slice(6).split(",").map((s) => s.trim()).filter(Boolean);
 		else if (p.startsWith("output=")) output = p.slice(7).trim();
 		else if (p.startsWith("iterate=")) iterate = p.slice(8).trim();
-		else if (p.startsWith("tools=")) tools = p.slice(6).split(",").map((s) => s.trim()).filter(Boolean);
-		else if (p.startsWith("maxTools=")) {
-			const n = Number.parseInt(p.slice(9), 10);
-			if (Number.isFinite(n) && n > 0) maxTools = n;
+		else if (p.startsWith("checkpoint=")) {
+			const tok = p.slice(11).trim();
+			// Stable token: letters, digits, underscore, hyphen. Invalid tokens
+			// are ignored.
+			if (/^[A-Za-z0-9_-]+$/.test(tok)) checkpoint = tok;
 		}
+		// Unknown flags are ignored — keeps the grammar forward-compatible.
 	}
-	return { agent, parallel, reads, output, maxTools, iterate, tools };
+	return { agent, parallel, reads, output, iterate, checkpoint };
 }
 
 /* ───────────────────────── prose inference ───────────────────────── */
@@ -281,9 +279,8 @@ export function parseSteps(body: string): Array<{ header: ParsedStepHeader; task
 			parallel: parsed?.parallel ?? false,
 			reads: parsed?.reads ?? [],
 			output: parsed?.output,
-			maxTools: parsed?.maxTools,
 			iterate: parsed?.iterate,
-			tools: parsed?.tools,
+			checkpoint: parsed?.checkpoint,
 		};
 		// Collect body paragraphs until the next `## ` step.
 		i++;
@@ -335,21 +332,20 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 			agent: header.agent,
 			label: header.phase, // label == phase for recipes; renderPlan shows it
 			task: resolvedTask,
-			output: outputs ? outputRaw : outputRaw, // keep raw for display
+			output: outputRaw,
 			outputs,
 			reads: reads.length > 0 ? reads : undefined,
 			parallel: header.parallel ? 1 : undefined,
-			maxTools: header.maxTools,
 			iterate,
-			tools: header.tools,
+			checkpoint: header.checkpoint,
 		};
 	});
 
-	// Compose each step's task: hints + per-step tool budget (maxTools) + base
-	// task. composeStepTask handles the prefix/TASK: marker consistently.
+	// Compose each step's task: hints prefix the base task (composeStepTask
+	// handles the HINTS/TASK: marker consistently).
 	const finalSteps = steps.map((s) => ({
 		...s,
-		task: composeStepTask(s.task, input.hints, s.maxTools),
+		task: composeStepTask(s.task, input.hints),
 	}));
 
 	return {
@@ -379,172 +375,3 @@ export function usedPlaceholders(raw: string): string[] {
 	return [...set];
 }
 
-/** Compile a parsed Recipe Plan into a pi-subagents execution chain array.
- *  Translates iterate= steps to expand/parallel blocks, adding outputSchema
- *  for any step writing a .json file so coordinates bind structured outputs natively. */
-export function slugifyAs(name: string): string {
-	return name.replace(/[^A-Za-z0-9_]/g, "_");
-}
-
-function resolveTargetPath(target: TargetSpec, ws: WorkspaceInfo): string {
-	if (target.scheme === "work") {
-		if (target.kind === "collection") {
-			return path.join(ws.collectionsDir, target.name, `${target.name}-{unit.path}.${target.ext}`);
-		}
-		return path.join(ws.targetsDir, `${target.name}.${target.ext}`);
-	}
-	if (target.scheme === "temp") {
-		return path.join(ws.scratchRoot, target.rawPath ?? `${target.name}.${target.ext}`);
-	}
-	if (target.scheme === "project") {
-		return path.resolve(target.rawPath ?? target.name);
-	}
-	return target.rawPath ?? target.name;
-}
-
-function resolveReadPath(read: string, _plan: Plan, stepIndex: number, _ws?: WorkspaceInfo): string {
-	if (read.startsWith("project:")) return read.slice(8);
-	// For named target references in a non-workspace compile, pass through as-is.
-	return read;
-}
-
-function injectCollectionRef(task: string, collectionName: string): string {
-	return `Refer to the collected output \`{outputs.${collectionName}}\`.\n\n${task}`;
-}
-
-/** Compile a parsed Recipe Plan into a pi-subagents execution chain array.
- *  Translates iterate= steps to expand/parallel blocks, adding outputSchema
- *  for any step writing a .json file so coordinates bind structured outputs natively.
- *  When a WorkspaceInfo is provided, target-based outputs resolve to absolute
- *  workspace paths and {outputs.<name>} references are injected for collection
- *  reads (Stage 2). */
-export function compileRecipeToChain(plan: Plan, _ws?: WorkspaceInfo): any[] {
-	const chain: any[] = [];
-	// Build a lookup of target name → TargetSpec from all steps for read resolution.
-	const allTargets = new Map<string, TargetSpec>();
-	for (const s of plan.steps) {
-		for (const t of s.outputs ?? []) allTargets.set(t.name, t);
-	}
-	for (let stepIndex = 0; stepIndex < plan.steps.length; stepIndex++) {
-		const step = plan.steps[stepIndex];
-		const isIterate = typeof step.iterate === "string" && step.iterate.length > 0;
-
-		// Resolve reads for this step.
-		const resolvedReads: string[] = [];
-		let resolvedTask = step.task;
-
-		// Stage 3: inject temp/scratch directory when workspace is available.
-		if (_ws) {
-			const tempDir = _ws.scratchRoot;
-			resolvedTask = `Use the scratch directory ${tempDir} for any temporary files you create. ` +
-				`Do not write your main output there; use the output path specified below.\n\n${resolvedTask}`;
-		}
-
-		for (const read of step.reads ?? []) {
-			if (read.startsWith("project:")) {
-				resolvedReads.push(read.slice(8));
-				continue;
-			}
-			if (isLegacyOutput(read)) {
-				resolvedReads.push(read);
-				continue;
-			}
-			const target = allTargets.get(read);
-			if (target && _ws) {
-				if (target.kind === "collection") {
-					resolvedTask = injectCollectionRef(resolvedTask, read);
-				} else {
-					resolvedReads.push(resolveTargetPath(target, _ws));
-				}
-			} else {
-				resolvedReads.push(read); // passthrough when workspace unavailable
-			}
-		}
-
-		if (isIterate) {
-			const sourceName = step.iterate!.replace(/[^A-Za-z0-9_]/g, "_");
-			const itemVar = "unit";
-			const expand = {
-				from: { output: sourceName, path: "/items" },
-				item: itemVar,
-				key: "/path",
-				maxItems: 100,
-			};
-			const parallel: Record<string, any> = {
-				agent: step.agent,
-				task: resolvedTask,
-			};
-			if (resolvedReads.length > 0) {
-				parallel.reads = resolvedReads;
-			}
-			if (step.outputs && step.outputs.length > 0 && _ws) {
-				const t = step.outputs[0];
-				if (t.kind === "collection") {
-					parallel.output = resolveTargetPath(t, _ws);
-				}
-			} else if (step.output) {
-				parallel.output = step.output.replace(/\{unit\}/g, "{unit.path}");
-			}
-			chain.push({
-				phase: step.phase,
-				label: step.label,
-				expand,
-				parallel,
-				collect: { as: step.outputs?.[0] ? slugifyAs(step.outputs[0].name) : `collected_${sourceName}` },
-			});
-		} else {
-			const item: Record<string, any> = {
-				agent: step.agent,
-				phase: step.phase,
-				label: step.label,
-				task: resolvedTask,
-			};
-			if (resolvedReads.length > 0) {
-				item.reads = resolvedReads;
-			}
-			if (step.outputs && step.outputs.length > 0 && _ws) {
-				const t = step.outputs[0];
-				item.output = resolveTargetPath(t, _ws);
-				item.as = slugifyAs(t.name); // register named output for {outputs.NAME} references
-				if (t.ext === "json") {
-					item.outputSchema = {
-						type: "object",
-						properties: {
-							items: {
-								type: "array",
-								items: {
-									type: "object",
-									properties: { path: { type: "string" } },
-									required: ["path"],
-								},
-							},
-						},
-						required: ["items"],
-					};
-				}
-			} else if (step.output) {
-				item.output = step.output;
-				if (step.output.endsWith(".json")) {
-					const stem = step.output.replace(/\.json$/, "").replace(/[^A-Za-z0-9_]/g, "_");
-					item.as = stem;
-					item.outputSchema = {
-						type: "object",
-						properties: {
-							items: {
-								type: "array",
-								items: {
-									type: "object",
-									properties: { path: { type: "string" } },
-									required: ["path"],
-								},
-							},
-						},
-						required: ["items"],
-					};
-				}
-			}
-			chain.push(item);
-		}
-	}
-	return chain;
-}

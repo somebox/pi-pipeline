@@ -232,6 +232,7 @@ const TM = {
 	util: "openrouter/minimax/minimax-m3",
 	research: "openrouter/z-ai/glm-5.2",
 	high: "openrouter/anthropic/claude-sonnet-5",
+	dev: "openrouter/moonshotai/kimi-k2.7-code",
 };
 
 test("injectTierModels: single shape injects util model", () => {
@@ -313,7 +314,7 @@ test("buildCostStep: single shape", () => {
 		{ agent: "util", task: "do work here" },
 		{ mode: "single", results: [{ agent: "util", model: "x", task: "do work here", exitCode: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.01, turns: 1 } }] },
 		3,
-	);
+	)!;
 	assert.equal(step.stepIndex, 3);
 	assert.equal(step.mode, "single");
 	assert.equal(step.agent, "util");
@@ -328,7 +329,7 @@ test("buildCostStep: parallel shape summarizes N tasks", () => {
 			{ agent: "research", model: "r", task: "merge", exitCode: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.01, turns: 1 } },
 		] },
 		1,
-	);
+	)!;
 	assert.equal(step.mode, "parallel");
 	assert.equal(step.agent, "high,research");
 	assert.match(step.task, /^2 tasks · /);

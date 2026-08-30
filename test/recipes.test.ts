@@ -8,8 +8,9 @@ import assert from "node:assert/strict";
 import {
 	parseFrontmatter, parseStepHeaderTail, inferOutput, inferReads,
 	substituteInputs, parseSteps, buildPlanFromRecipe, declaredInputs,
-	usedPlaceholders, compileRecipeToChain,
+	usedPlaceholders,
 } from "../src/recipes.ts";
+import { renderPlan } from "../src/lib.ts";
 
 /* ───────────────────────── frontmatter ───────────────────────── */
 
@@ -49,18 +50,18 @@ body`);
 /* ───────────────────────── step header tail ───────────────────────── */
 
 test("parseStepHeaderTail: agent only", () => {
-	assert.deepEqual(parseStepHeaderTail("(util)"), { agent: "util", parallel: false, reads: [], output: undefined, maxTools: undefined, iterate: undefined, tools: undefined });
+	assert.deepEqual(parseStepHeaderTail("(util)"), { agent: "util", parallel: false, reads: [], output: undefined, iterate: undefined, checkpoint: undefined });
 });
 
 test("parseStepHeaderTail: agent + parallel + flags", () => {
 	assert.deepEqual(parseStepHeaderTail("(dev, parallel, reads=a.md,b.md, output=c.md)"), {
-		agent: "dev", parallel: true, reads: ["a.md", "b.md"], output: "c.md", maxTools: undefined, iterate: undefined, tools: undefined,
+		agent: "dev", parallel: true, reads: ["a.md", "b.md"], output: "c.md", iterate: undefined, checkpoint: undefined,
 	});
 });
 
 test("parseStepHeaderTail: custom agent name", () => {
 	assert.deepEqual(parseStepHeaderTail("(my-custom-agent)"), {
-		agent: "my-custom-agent", parallel: false, reads: [], output: undefined, maxTools: undefined, iterate: undefined, tools: undefined,
+		agent: "my-custom-agent", parallel: false, reads: [], output: undefined, iterate: undefined, checkpoint: undefined,
 	});
 });
 
@@ -222,75 +223,42 @@ test("buildPlanFromRecipe: missing input left as {{name}}", () => {
 	assert.match(plan.steps[0].task, /\{\{scope\}\}/);
 });
 
-/* ───────────────────────── maxTools budget ───────────────────────── */
+/* ───────────────────────── iterate + checkpoint ───────────────────────── */
 
-test("parseStepHeaderTail: parses maxTools=N", () => {
-	assert.deepEqual(parseStepHeaderTail("(util, maxTools=5)"), {
-		agent: "util", parallel: false, reads: [], output: undefined, maxTools: 5, iterate: undefined, tools: undefined,
-	});
-	assert.deepEqual(parseStepHeaderTail("(util, parallel, reads=a.md, maxTools=10, output=b.md)"), {
-		agent: "util", parallel: true, reads: ["a.md"], output: "b.md", maxTools: 10, iterate: undefined, tools: undefined,
+test("parseStepHeaderTail: parses iterate=name", () => {
+	assert.deepEqual(parseStepHeaderTail("(dev, iterate=scope-files)"), {
+		agent: "dev", parallel: false, reads: [], output: undefined,
+		iterate: "scope-files", checkpoint: undefined,
 	});
 });
 
-test("parseStepHeaderTail: invalid maxTools is ignored (not a positive integer)", () => {
-	assert.equal(parseStepHeaderTail("(util, maxTools=0)")!.maxTools, undefined);
-	assert.equal(parseStepHeaderTail("(util, maxTools=abc)")!.maxTools, undefined);
+test("parseStepHeaderTail: parses checkpoint=<stable-token>; invalid tokens ignored", () => {
+	assert.deepEqual(parseStepHeaderTail("(high, checkpoint=candidate-sprint)"), {
+		agent: "high", parallel: false, reads: [], output: undefined, iterate: undefined, checkpoint: "candidate-sprint",
+	});
+	assert.equal(parseStepHeaderTail("(util, checkpoint=has space)")!.checkpoint, undefined);
+	assert.equal(parseStepHeaderTail("(util, checkpoint=)")!.checkpoint, undefined);
+	assert.equal(parseStepHeaderTail("(util)")!.checkpoint, undefined);
 });
 
-test("buildPlanFromRecipe: maxTools flows through to PlanStep", () => {
+test("buildPlanFromRecipe: checkpoint flows through to PlanStep and renderPlan", () => {
 	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, maxTools=3)\nread files and write out.md",
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, checkpoint=go-no-go, output=out:md)\nread files\n\n## 2. Next (util, reads=out)\ncontinue",
 		nameFallback: "x",
 	});
-	assert.equal(plan.steps[0].maxTools, 3);
+	assert.equal(plan.steps[0]!.checkpoint, "go-no-go");
+	assert.equal(plan.steps[1]!.checkpoint, undefined);
+	const rendered = renderPlan(plan, "task", false);
+	assert.ok(rendered.includes("[checkpoint: go-no-go]"), "header tag missing");
+	assert.ok(rendered.includes("**Checkpoint:** `go-no-go`"), "checkpoint bullet missing");
 });
 
-test("buildPlanFromRecipe: budget instruction injected into task when maxTools set", () => {
+test("buildPlanFromRecipe: iterate flows through to PlanStep", () => {
 	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, maxTools=5)\nread files and write out.md",
-		nameFallback: "x",
-	});
-	assert.match(plan.steps[0].task, /TOOL BUDGET: You may make at most 5 tool calls total/);
-	assert.match(plan.steps[0].task, /Do not exceed 5 calls/);
-});
-
-test("buildPlanFromRecipe: no maxTools means no budget instruction", () => {
-	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util)\nread files and write out.md",
-		nameFallback: "x",
-	});
-	assert.doesNotMatch(plan.steps[0].task, /TOOL BUDGET/);
-	assert.equal(plan.steps[0].maxTools, undefined);
-});
-
-test("buildPlanFromRecipe: budget composes with hints (hints then budget)", () => {
-	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, maxTools=4)\nread files and write out.md",
-		nameFallback: "x",
-		hints: ["no new deps"],
-	});
-	const t = plan.steps[0].task;
-	assert.match(t, /^HINTS:\n- no new deps\n\n/);
-	assert.match(t, /TOOL BUDGET:.*at most 4 tool calls/);
-});
-
-/* ───────────────────────── iterate + tools (Phase 2) ───────────────────────── */
-
-test("parseStepHeaderTail: parses iterate=name and tools=a,b", () => {
-	assert.deepEqual(parseStepHeaderTail("(dev, iterate=scope-files, tools=read,write)"), {
-		agent: "dev", parallel: false, reads: [], output: undefined, maxTools: undefined,
-		iterate: "scope-files", tools: ["read", "write"],
-	});
-});
-
-test("buildPlanFromRecipe: iterate and tools flow through to PlanStep", () => {
-	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Do (dev, iterate=scope-files, tools=read,write)\nread files and write out.md",
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do (dev, iterate=scope-files)\nread files and write out.md",
 		nameFallback: "x",
 	});
 	assert.equal(plan.steps[0].iterate, "scope-files");
-	assert.deepEqual(plan.steps[0].tools, ["read", "write"]);
 });
 
 test("buildPlanFromRecipe: infers iterate from prose", () => {
@@ -300,68 +268,3 @@ test("buildPlanFromRecipe: infers iterate from prose", () => {
 	});
 	assert.equal(plan.steps[0].iterate, "scope-files");
 });
-
-/* ───────────────────────── compileRecipeToChain (Phase 2) ───────────────────────── */
-
-test("compileRecipeToChain: translates single standard step with .json output to dynamic outputSchema", () => {
-	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Enumerate (util, output=scope-files.json)\nGet lists.",
-		nameFallback: "x",
-	});
-	const chain = compileRecipeToChain(plan);
-	assert.equal(chain.length, 1);
-	assert.equal(chain[0].agent, "util");
-	assert.equal(chain[0].as, "scope_files"); // parsed from output filename and slugified to safe name
-	assert.equal(chain[0].output, "scope-files.json");
-	assert.deepEqual(chain[0].outputSchema, {
-		type: "object",
-		properties: {
-			items: {
-				type: "array",
-				items: {
-					type: "object",
-					properties: {
-						path: { type: "string" }
-					},
-					required: ["path"]
-				}
-			}
-		},
-		required: ["items"]
-	});
-});
-
-test("compileRecipeToChain: sequential step never emits tools (schema has no such field)", () => {
-	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Do (util, tools=read,write)\nDo the thing.",
-		nameFallback: "x",
-	});
-	const chain = compileRecipeToChain(plan);
-	assert.equal(chain.length, 1);
-	assert.equal(chain[0].tools, undefined);
-});
-
-test("compileRecipeToChain: translates iterate step to expand/parallel subagent block", () => {
-	const plan = buildPlanFromRecipe({
-		raw: "---\nname: x\n---\n# x\n\n## 1. Summarize (dev, iterate=scope-files, output=summary-{unit}.md, tools=read,write)\nDo for {unit.path}",
-		nameFallback: "x",
-	});
-	const chain = compileRecipeToChain(plan);
-	assert.equal(chain.length, 1);
-	assert.equal(chain[0].phase, "Summarize");
-	assert.deepEqual(chain[0].expand, {
-		from: { output: "scope_files", path: "/items" },
-		item: "unit",
-		key: "/path",
-		maxItems: 100,
-	});
-	assert.equal(chain[0].parallel.agent, "dev");
-	assert.equal(chain[0].parallel.task, "Do for {unit.path}");
-	assert.equal(chain[0].parallel.output, "summary-{unit.path}.md");
-	// pi-subagents' DynamicParallelTemplateSchema rejects unknown keys (additionalProperties:
-	// false) and has no `tools` field — the compiler must not emit step.tools into the chain
-	// even though the recipe parsed a tools= flag. Tool bounding is agent-level only.
-	assert.equal(chain[0].parallel.tools, undefined);
-	assert.deepEqual(chain[0].collect, { as: "collected_scope_files" });
-});
-

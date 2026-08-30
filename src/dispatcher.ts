@@ -452,6 +452,21 @@ export async function dispatchIterate(
 			if (text) r.text = text;
 			if (hadError) r.error = "agent error";
 			if (hadAborted) r.error = "aborted";
+			// Durable per-unit output: if this step declares a collection output
+			// and the agent (e.g. a read-only profile) did not write it, persist
+			// the returned text to the resolved per-unit path and verify. A
+			// persistence/verification failure marks the unit failed — mirroring
+			// the singleton output semantics of dispatchStep.
+			if (r.status === "completed") {
+				const t = step.outputs?.[0];
+				if (t && t.kind === "collection" && text) {
+					const persist = persistUnitOutput(t, ws, unit, text);
+					if (persist.error) {
+						r.status = "failed";
+						r.error = persist.error;
+					}
+				}
+			}
 			results[i] = r;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -554,6 +569,11 @@ export function composeIterateTask(step: PlanStep, ws: WorkspaceInfo, unit: Iter
 		lines.push(`Write your output to: ${abs}`);
 		lines.push("If your tool profile cannot write files directly, put the complete markdown output in your final response; the dispatcher will persist it to that path.");
 	}
+	if (step.reads && step.reads.length > 0) {
+		const absReads = step.reads.map((r) => resolveReadAbs(r, ws));
+		lines.push(`Read from: ${absReads.join(", ")}`);
+		lines.push("If a listed read does not exist, that input is empty for this run; note it and continue with what is available.");
+	}
 	lines.push("");
 	let task = step.task;
 	for (const [k, v] of Object.entries(unit)) {
@@ -573,7 +593,7 @@ function resolveOutputAbs(t: { scheme: string; rawPath?: string; name: string; e
 	return t.rawPath ?? t.name;
 }
 
-function resolveCollectionOutputAbs(t: { rawPath?: string; name: string; ext: string }, ws: WorkspaceInfo, unit: IterateUnit): string {
+export function resolveCollectionOutputAbs(t: { rawPath?: string; name: string; ext: string }, ws: WorkspaceInfo, unit: IterateUnit): string {
 	const unitKey = String(unit.path ?? unit.id ?? "unit");
 	// `{unit.path}` in a collection pattern means the unit's *stem* (no
 	// extension) — the target's extension is always appended. This avoids
@@ -597,6 +617,10 @@ function resolveReadAbs(read: string, ws: WorkspaceInfo): string {
 		if (fs.existsSync(mdPath)) return mdPath;
 		if (fs.existsSync(jsonPath)) return jsonPath;
 		if (fs.existsSync(collectionDir)) return collectionDir;
+		// Keep unresolved named-target reads absolute and workspace-scoped. This
+		// lets iterate agents reliably treat a missing collection as empty instead
+		// of receiving a misleading bare token such as "medium_log".
+		return collectionDir;
 	}
 	return read;
 }
@@ -614,6 +638,37 @@ function persistMissingSingletonOutputs(step: PlanStep, ws: WorkspaceInfo, text:
 		}
 		fs.mkdirSync(path.dirname(abs), { recursive: true });
 		fs.writeFileSync(abs, content, "utf-8");
+	}
+}
+
+/** Persist a unit's returned text to its resolved collection path when the
+ *  agent did not write the file itself (notably read-only profiles like
+ *  `high`). Verifies existence afterwards. Returns an error string when the
+ *  output could not be durably persisted; undefined on success. Mirrors the
+ *  singleton output semantics of `persistMissingSingletonOutputs`. */
+export function persistUnitOutput(
+	t: { kind: "singleton" | "collection"; rawPath?: string; name: string; ext: string },
+	ws: WorkspaceInfo,
+	unit: IterateUnit,
+	text: string,
+): { error?: string } {
+	const abs = resolveCollectionOutputAbs(t, ws, unit);
+	try {
+		if (!fs.existsSync(abs)) {
+			let content = text;
+			if (t.ext === "json") {
+				const parsed = parseJsonFromText(text);
+				if (parsed === undefined) return { error: `Could not parse JSON from unit output for ${abs}` };
+				content = JSON.stringify(parsed, null, 2);
+			}
+			fs.mkdirSync(path.dirname(abs), { recursive: true });
+			fs.writeFileSync(abs, content, "utf-8");
+		}
+		if (!fs.existsSync(abs)) return { error: `Expected output was not written: ${abs}` };
+		return {};
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return { error: `Failed to persist unit output ${abs}: ${msg}` };
 	}
 }
 
@@ -678,7 +733,9 @@ export function buildManifestStep(
 	};
 	if (step.outputs) {
 		ms.outputs = step.outputs.map((t) => {
-			const abs = resolveOutputAbs(t, ws);
+			const abs = t.kind === "collection"
+				? path.join(ws.collectionsDir, t.name)
+				: resolveOutputAbs(t, ws);
 			return {
 				name: t.name,
 				kind: t.kind,
@@ -686,6 +743,7 @@ export function buildManifestStep(
 			};
 		});
 	}
+	if (step.checkpoint) ms.checkpoint = step.checkpoint;
 	return ms;
 }
 

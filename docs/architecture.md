@@ -45,17 +45,13 @@ accumulated 188k tokens, then 400'd on a model-limit mismatch — see
    a slim shared onboarding + the prompt — and a **bounded tool set** so
    they *can't* explore. "Bounded" means the agent's normal tools *minus
    exploration tools* (`ls`, `find`, `grep`) — not a fixed `{read, write}`
-   allowlist — so it composes with whatever a custom agent brings. A recipe
-   step can *declare* `tools=<list>` for documentation/validation, but
-   enforcement is **agent-level only**: pi-subagents' compiled chain schema
-   (`ChainItem`, `DynamicParallelTemplateSchema`) has no per-task `tools`
-   field at all (`additionalProperties: false`), confirmed by the Phase 2
-   spike against a real repo. So the real lever is picking (or adding) an
-   agent whose own `tools:` frontmatter matches the bound you want — e.g.
-   `code-quality` step 8 "Present" should route to an agent whose `tools:`
-   is just `read`, not declare `tools=read` on the step. Small context is
-   enforced by agent choice, not requested via a step flag that the runtime
-   would reject anyway.
+   allowlist — so it composes with whatever a custom agent brings. Tool
+   bounding is **agent-level only**: pick (or add) an agent whose own `tools:`
+   frontmatter matches the bound you want — e.g. `code-quality` step 8
+   "Present" should route to an agent whose `tools:` is just `read`. There
+   is no per-step `tools=` flag (it was removed: it was never honored by the
+   runtime, and keeping it as a no-op display flag misled authors). Small
+   context is enforced by agent choice, not requested via a step flag.
 6. **Coordinator is opt-in, split into two concerns.** Enumeration is often
    mechanical (a glob — no agent call); authoring a good per-unit prompt is
    judgment (a `coordinator` agent). The parent LLM doesn't write per-unit
@@ -89,10 +85,10 @@ accumulated 188k tokens, then 400'd on a model-limit mismatch — see
   one — the recipe's steps run as written. Iteration is declared in the
   recipe, not inferred from the user's phrasing. (Documented so it's a
   decision, not a silent gap someone reports as a bug.)
-- **`maxTools` is deprecated.** Phase 1.5's soft tool-call budget proved
-  unreliable (the parent rewrites the task and drops it). It's superseded by
-  the bounded-`tools=` mechanism. Kept in code for one release as a no-op
-  hint; removed in Phase 2. New recipes should not use it.
+- **`maxTools` is removed.** Phase 1.5's soft tool-call budget proved
+  unreliable (the parent rewrites the task and drops it). It was superseded
+  by bounded agent `tools:` allowlists, and the flag has since been deleted
+  from the parser and `PlanStep`. Use a bounded agent instead.
 
 ## Why iteration (the motivation)
 
@@ -104,7 +100,7 @@ mismatch where pi believed `minimax-m3` had a 1M window but Parasail enforces
 524k — see README "Model limits"). Even discounting the 400, the run was
 slow and expensive because one agent held the whole repo in context.
 
-Soft enforcement (`maxTools` prompt budget) was tried and is unreliable:
+Soft enforcement (a `maxTools` prompt budget) was tried and is unreliable:
 the parent LLM rewrites the task before dispatching and drops the budget
 instruction. Bounded agents (`tools: read, write`, no `ls`/`find`/`bash`)
 are real enforcement but blunt on their own.
@@ -174,23 +170,16 @@ The parent LLM does **not** orchestrate subagent dispatch. There is no
 there is no risk of the parent paraphrasing or dropping the task. The
 pipeline runs deterministically inside the tool's `execute`.
 
-### Why own the dispatcher (not pi-subagents)
+### Why own the dispatcher
 
-The 0.5.0 plan assumed `@tintinweb/pi-subagents` would provide a chain
-runtime (`expand`/`collect`/`{outputs.*}`) and we'd compile onto it.
-Review against the published package (0.12.0 installed, 0.13.0 latest)
-found:
-
-- The chain API does not exist in any published release
-- The tool was silently renamed `subagent` → `Agent`, leaving every
-  `event.toolName === "subagent"` hook in the extension dead
-- No local fork was recoverable
-
-`@tintinweb/pi-subagents` is a thin wrapper over pi's first-party SDK — the
-same package we already declare as a peerDependency. Owning the dispatcher
-depends on the SDK directly, eliminating the third-party extension as a
-variable. See [artifacts.md](artifacts.md) §Relationship to pi-subagents
-runtime for the full rationale.
+An earlier design compiled recipes onto a third-party `pi-subagents` chain
+runtime (`expand`/`collect`/`{outputs.*}`). That runtime's chain API never
+shipped in a published release and the tool was silently renamed, leaving
+the compiled path dead. `pi-subagents` is a thin wrapper over pi's
+first-party SDK — the same package we already declare as a peerDependency —
+so owning the dispatcher depends on the SDK directly and removes the
+third-party extension as a variable. See [artifacts.md](artifacts.md)
+§Relationship to pi-subagents runtime for the full rationale.
 
 ### The runtime contract
 

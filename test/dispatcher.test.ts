@@ -21,6 +21,9 @@ import {
 	recordStepResult,
 	loadUnits,
 	collectCollection,
+	composeIterateTask,
+	persistUnitOutput,
+	resolveCollectionOutputAbs,
 	type AgentProfile,
 	type StepResult,
 } from "../src/dispatcher.ts";
@@ -323,6 +326,19 @@ test("composeIterateTask: collection path strips double extension", () => {
 	assert.equal(substituted, "summary-docs/ARCHITECTURE.md");
 });
 
+test("composeIterateTask: unresolved named reads remain absolute and workspace-scoped", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-readpath-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	const ws = createWorkspace(tmp, "x");
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do  (high, reads=missing_collection)\nReview {unit.path}.",
+		nameFallback: "x",
+	});
+	const task = composeIterateTask(plan.steps[0]!, ws, { path: "a" });
+	assert.match(task, new RegExp(path.join(ws.collectionsDir, "missing_collection").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	assert.doesNotMatch(task, /Read from: missing_collection(?:,|\n)/);
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 test("recordStepResult: partial iterate result carries units[]", () => {
 	const tmp = path.join(os.tmpdir(), `pi-pipeline-dispatcher-${Date.now()}`);
 	const ws = createWorkspace(tmp, "x");
@@ -346,5 +362,69 @@ test("recordStepResult: partial iterate result carries units[]", () => {
 	assert.equal(step.outputs[0]!.units.length, 3);
 	assert.equal(step.outputs[0]!.units[2]!.status, "failed");
 	assert.equal(step.outputs[0]!.units[2]!.error, "context-overflow");
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+/* ─────────── per-unit collection output persistence (read-only agents) ─────────── */
+
+test("persistUnitOutput: writes the returned text when the unit output is missing", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-unitpersist-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	const ws = createWorkspace(tmp, "x");
+	const t = { name: "review", ext: "md", kind: "collection" as const };
+	const res = persistUnitOutput(t, ws, { path: "src/a.ts" }, "verdict: accept");
+	assert.equal(res.error, undefined);
+	const abs = path.join(ws.collectionsDir, "review", "review-src", "a.ts.md");
+	assert.ok(fs.existsSync(abs), `per-unit output should exist at ${abs}`);
+	assert.equal(fs.readFileSync(abs, "utf-8"), "verdict: accept");
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("persistUnitOutput: never overwrites a file the agent already wrote", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-unitpersist-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	const ws = createWorkspace(tmp, "x");
+	const abs = path.join(ws.collectionsDir, "review", "review-x.md");
+	fs.mkdirSync(path.dirname(abs), { recursive: true });
+	fs.writeFileSync(abs, "agent wrote this", "utf-8");
+	const res = persistUnitOutput({ name: "review", ext: "md", kind: "collection" }, ws, { path: "x.md" }, "returned text");
+	assert.equal(res.error, undefined);
+	assert.equal(fs.readFileSync(abs, "utf-8"), "agent wrote this");
+	assert.equal(fs.readdirSync(path.dirname(abs)).length, 1, "no extra file should be created");
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("persistUnitOutput: json units are parsed and pretty-printed; invalid json fails the unit", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-unitpersist-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	const ws = createWorkspace(tmp, "x");
+	const t = { name: "units", ext: "json", kind: "collection" as const };
+	const ok = persistUnitOutput(t, ws, { path: "u1" }, `{ "a": 1 }`);
+	assert.equal(ok.error, undefined);
+	const abs = path.join(ws.collectionsDir, "units", "units-u1.json");
+	assert.deepEqual(JSON.parse(fs.readFileSync(abs, "utf-8")), { a: 1 });
+	const bad = persistUnitOutput(t, ws, { path: "u2" }, "not json {");
+	assert.ok(bad.error && bad.error.includes("Could not parse JSON"));
+	assert.ok(!fs.existsSync(path.join(ws.collectionsDir, "units", "u2.json")));
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("resolveCollectionOutputAbs: unit stem substitution", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-unitpersist-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	const ws = createWorkspace(tmp, "x");
+	const abs = resolveCollectionOutputAbs({ name: "summary", ext: "md" }, ws, { path: "docs/A.md" });
+	assert.ok(abs.startsWith(ws.collectionsDir), `abs = ${abs}`);
+	assert.ok(abs.endsWith(path.join("summary", "summary-docs", "A.md")), `abs = ${abs}`);
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("buildManifestStep: checkpoint flows through; collection output path is collections/<name>", () => {
+	const tmp = path.join(os.tmpdir(), `pi-pipeline-buildms-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	const ws = createWorkspace(tmp, "x");
+	const plan = buildPlanFromRecipe({
+		raw: "---\nname: x\n---\n# x\n\n## 1. Do  (high, checkpoint=go, output=review-{unit.path})\nFor each `{unit}` in scope, review it.",
+		nameFallback: "x",
+	});
+	const ms = buildManifestStep(plan.steps[0]!, ws);
+	assert.equal(ms.checkpoint, "go");
+	assert.equal(ms.outputs![0]!.kind, "collection");
+	assert.equal(ms.outputs![0]!.path, `collections${path.sep}review`);
 	fs.rmSync(tmp, { recursive: true, force: true });
 });

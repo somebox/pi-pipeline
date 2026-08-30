@@ -4,6 +4,63 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-30
+
+### Added
+- **Recipe checkpoints.** Step header flag `checkpoint=<stable-token>` (`src/recipes.ts`, `PlanStep.checkpoint`, manifest step `checkpoint`). When a checkpoint step **completes**, the run is persisted with status `paused` (no blocking UI) and the `pipeline` tool returns the run id, checkpoint token, the step's output paths, the run log path, and the exact resume syntax. `renderPlan` and the run README surface checkpoints.
+- **Checkpoint resume params** on the `pipeline` tool: `checkpoint`, `checkpointDecision` (`approve` | `reject` | `revise`), `checkpointNote` — valid only with `resume` on a paused run. The token is validated against the pending checkpoint in the manifest; resuming without a decision or with a mismatched token fails safely; recipe hash drift remains refused.
+  - `approve`: the completed checkpoint step is preserved (skipped by `planDelta`), the decision/note is recorded under `manifest.checkpoints`, and a non-empty note is injected into every remaining step as `USER CHECKPOINT FEEDBACK`.
+  - `reject`: recorded and the run is finalized `rejected` without executing later steps.
+  - `revise`: major-revision feedback recorded, run stopped (`rejected`), and the result instructs starting a fresh run of the same recipe with the note as steering.
+- **`paused` / `rejected` run statuses.** Paused runs are discoverable by `latestIncomplete` / `/pipeline-runs`; finalized `rejected` runs are not auto-resumable and do not shadow paused runs.
+
+### Added
+- **Recipe checkpoints.** Step header flag `checkpoint=<stable-token>` (`src/recipes.ts`, `PlanStep.checkpoint`, manifest step `checkpoint`). When a checkpoint step **completes**, the run is persisted with status `paused` (no blocking UI) and the `pipeline` tool returns the run id, checkpoint token, the step's output paths, the run log path, and the exact resume syntax. `renderPlan` and the run README surface checkpoints.
+- **Checkpoint resume params** on the `pipeline` tool: `checkpoint`, `checkpointDecision` (`approve` | `reject` | `revise`), `checkpointNote` — valid only with `resume` on a paused run. The token is validated against the pending checkpoint in the manifest; resuming without a decision or with a mismatched token fails safely; recipe hash drift remains refused.
+  - `approve`: the completed checkpoint step is preserved (skipped by `planDelta`), the decision/note is recorded under `manifest.checkpoints`, and a non-empty note is injected into every remaining step as `USER CHECKPOINT FEEDBACK`.
+  - `reject`: recorded and the run is finalized `rejected` without executing later steps.
+  - `revise`: major-revision feedback recorded, run stopped (`rejected`), and the result instructs starting a fresh run of the same recipe with the note as steering.
+- **`paused` / `rejected` run statuses.** Paused runs are discoverable by `latestIncomplete` / `/pipeline-runs`; finalized `rejected` runs are not auto-resumable and do not shadow paused runs.
+- **Durable per-unit outputs in `dispatchIterate`.** When a unit step declares a collection output and the agent (notably read-only `high`) did not write it, the returned text is persisted to the resolved per-unit path and verified; persistence/verification failure marks the unit failed — mirroring singleton output semantics. `persistUnitOutput` / `resolveCollectionOutputAbs` are exported for tests.
+- **`pipelines/sprint-planning.md`** — end-to-end sprint recipe: planning-system discovery (local markdown, somebox/cards CLI, `gh` issues, TODO/FIXME/HACK markers, recent git), source/conflict reporting and system-of-record selection, candidate scoring, capped sprint tasks (≤20, overflow to follow-ups) partitioned into low/medium lists, per-task work logs, one per-task `high` review (`review-{unit.path}`), fix pass, verification + docs update, follow-up filing without duplicates, final `high` review, and a completion summary. Pauses at `checkpoint=candidate-sprint`, `checkpoint=sprint-plan-approved` (before any tracker mutation or implementation), and `checkpoint=next-action` (only the explicitly approved action runs; never commits or closes work without explicit instruction).
+- **Empty iterate lists** complete the step without dispatch instead of failing, so partitioned task/fix lists may legitimately be empty.
+- Iterate steps now inject resolved `reads=` absolute paths into the composed unit task (previously only singletons did).
+- `src/checkpoint.ts` — pure checkpoint helpers (`pendingCheckpoint`, `validateResumeDecision`, `applyCheckpointFeedback`, result renderers).
+- Tests: `test/checkpoint.test.ts` (parser flow-through, paused `latestIncomplete` discoverability, decision validation, feedback injection, renderers), per-unit persistence tests in `test/dispatcher.test.ts`, checkpoint expectations in `test/recipes.test.ts`.
+
+### Changed
+- `buildManifestStep` records collection outputs at `collections/<name>` (previously a misleading `targets/<name>.<ext>`), matching what `recordStepResult` writes.
+- `docs/spec.md` documents the checkpoint syntax and semantics; `docs/artifacts.md`, `docs/plan.md`, and `docs/examples.md` updated for the new statuses and the `sprint-planning` recipe.
+- **`sprint-planning` reworked: 23 steps → 11, 3 checkpoints → 2.** Discover+select
+  and collect+score are each merged into one step. The low/medium tier split and
+  its four mechanical partition steps are gone — the dispatcher fans out one
+  bounded `dev` per task and a `high` review + review-driven fix pass covers
+  judgment tasks without a tier split. The separate candidate-sprint checkpoint
+  is gone (the plan-approval checkpoint is the single pre-implementation gate).
+  The pre-execution tracker mutation is gone — tracker updates happen only on
+  the user-approved `next-action`. Two checkpoints remain: `sprint-approved`
+  (before any implementation) and `next-action` (commit/close only when
+  explicitly approved).
+
+### Removed
+- **`compileRecipeToChain` and the chain compiler** (`src/recipes.ts`) — the
+  pi-subagents `expand`/`parallel`/`collect` chain it compiled onto was
+  abandoned for the owned dispatcher; the compiler was dead at runtime, kept
+  only by golden-file tests. Deleted along with its dead helpers
+  (`slugifyAs`, `resolveTargetPath`, `resolveReadPath`, `injectCollectionRef`)
+  and the chain tests in `test/recipes.test.ts` / `test/targets.test.ts`.
+  `test/targets.test.ts` now asserts only parse + `validatePlanTargets` for real
+  recipe files.
+- **`tools=` per-step flag** — never honored by the runtime (the owned
+  dispatcher only reads the agent profile's `tools:`). Removed from the parser,
+  `PlanStep`, `ParsedStepHeader`, and the spec. Tool bounding is agent-level
+  only (documented).
+- **`maxTools` soft tool-call budget** (`PlanStep.maxTools`, `toolBudgetInstruction`,
+  `withToolBudget`, the `maxTools=N` header flag, the `[budget: N tools]` render
+  tag, the `probe` recipe's `maxTools=5`). It was unreliable (the parent
+  rewrites the task and drops it); real enforcement is bounded agent `tools:`
+  allowlists.
+
 ## [0.6.0] — 2026-08-29
 
 ### Added

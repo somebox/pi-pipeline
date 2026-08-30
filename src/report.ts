@@ -9,6 +9,7 @@ import { fmtCost, fmtTokens } from "./lib.ts";
 import type { Plan } from "./lib.ts";
 import type { Manifest, ManifestStep, RunListing, WorkspaceInfo } from "./workspace.ts";
 import { pipelineRoot, readManifest } from "./workspace.ts";
+import { pendingCheckpoint } from "./checkpoint.ts";
 
 export interface RunMetricsFile {
 	run_id: string;
@@ -62,7 +63,7 @@ function planLinesFrom(manifest: Manifest, plan?: Plan): string[] {
 function logRow(i: number, s: ManifestStep): string {
 	const dur = fmtDuration(s.durationMs);
 	const cost = s.usage ? fmtCost(s.usage.cost) : "—";
-	let status = s.status;
+	let status: string = s.status;
 	if (s.status === "partial") {
 		const units = s.outputs?.[0]?.units;
 		if (units && units.length > 0) {
@@ -155,7 +156,13 @@ export function renderRunReadme(
 	if (status !== "completed") {
 		lines.push("");
 		lines.push("## Resume");
-		lines.push(`\`/pipeline-resume ${manifest.run_id}\``);
+		if (status === "paused") {
+			const pending = pendingCheckpoint(manifest);
+			lines.push(`**Paused at checkpoint \`${pending?.token ?? "?"}\`** — resume with the pipeline tool: ` +
+				`\`resume: "${manifest.run_id}", checkpoint: "${pending?.token ?? "?"}", checkpointDecision: "approve | reject | revise"\` (+ optional checkpointNote).`);
+		} else {
+			lines.push(`\`/pipeline-resume ${manifest.run_id}\``);
+		}
 	}
 	const report = embedReportBody(ws);
 	if (report) {

@@ -7,8 +7,32 @@
 
 ## Shipped recipes
 
-The package ships six recipes in [`pipelines/`](../pipelines/). Each
+The package ships seven recipes in [`pipelines/`](../pipelines/). Each
 illustrates a different shape.
+
+### `sprint-planning` — a checkpointed end-to-end sprint
+
+File: [`pipelines/sprint-planning.md`](../pipelines/sprint-planning.md)
+
+The heaviest shipped recipe (11 steps, 2 checkpoints). It discovers the
+repo's planning system (local markdown plans/roadmaps, somebox/cards CLI
+when configured, GitHub issues via `gh` when authenticated, filtered
+TODO/FIXME/HACK markers, recent git commits), selects a system of record,
+and collects+scores candidates in one step. It normalizes the approved
+candidates into a capped sprint (at most 20 tasks; overflow becomes
+follow-ups), builds the detailed plan, and pauses at
+`checkpoint=sprint-approved` before any implementation. After approval it
+executes the tasks (one `dev` iterate step with per-task work logs), runs a
+per-task `high` review (`review-{unit.path}`, one-shot verdicts, no fixes),
+applies a review-driven fix pass (`dev` iterates over the reviews; an
+`accept` verdict is a no-op), verifies with the project's own checks, files
+new follow-ups without duplicates, and ends at `checkpoint=next-action`:
+only the explicitly approved action (commit or close/update tracker items)
+is performed — never a commit or closing without explicit instruction. The
+earlier three-checkpoint, tier-partitioned (low/medium) shape was collapsed:
+partitioning and the separate candidate checkpoint were removed because
+the dispatcher fans out one bounded subagent per task and the `high` review
++ fix loop covers judgment tasks without a tier split.
 
 ### `code-quality` — a fixed checklist (no iteration)
 
@@ -29,7 +53,7 @@ as iteration over the in-scope files.
 File: [`pipelines/verify-source.md`](../pipelines/verify-source.md)
 
 Scan docs, verify every quote/citation against its original source. Four
-steps; step 2 uses the legacy `parallel` flag (soft fan-out). A good minimal
+steps; step 2 uses the `parallel` hint (soft fan-out). A good minimal
 example of a non-iterating recipe with fan-out.
 
 ### `summarize-files` — the simplest iteration (proof-of-concept, shipped and verified)
@@ -81,15 +105,15 @@ board and writes both `shots.json` and `per-unit-prompt.md` (the matching
 logic is complex enough to warrant an authored template). Step 2 is a
 per-unit *chain* (commits → match → review → attach → rename → file) owned
 by one focused `dev` agent whose *own* `tools:` frontmatter is `read, write,
-bash` (not a per-step override — see [spec.md](spec.md)'s `tools=` note: the compiled
-chain schema has no such field, so the bound has to live on the agent). The
+bash` (tool bounding is agent-level only — see [spec.md](spec.md); there is
+no per-step `tools=` flag, so the bound has to live on the agent). The
 small-context guarantee holds because the subagent sees one screenshot + the
 shared board list + the prompt — not the whole repo or all screenshots.
 
 Reference shape (target):
 ```markdown
-## 1. Enumerate screenshots + load board  (coordinator, output=shots.json, tools=read,bash)
-## 2. Process each screenshot  (dev, iterate=shots, reads=per-unit-prompt.md, board.json, output=worklog-{unit.path}.md, tools=read,write,bash)
+## 1. Enumerate screenshots + load board  (coordinator, output=shots.json)
+## 2. Process each screenshot  (dev, iterate=shots, reads=per-unit-prompt.md, board.json, output=worklog-{unit.path}.md)
 ## 3. Report  (research, reads=worklog-*.md, output=report.md)
 ```
 

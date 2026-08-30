@@ -414,6 +414,17 @@ Design it for tomorrow even if v1 only writes a subset:
   told the failure count so it can qualify its synthesis.
 - A singleton step that fails gets `status: "failed"`; steps whose `reads`
   depend on it are not dispatched and are recorded as `"blocked"`.
+- A step with `checkpoint=<token>` that **completes** pauses the run: the
+  manifest status becomes `"paused"` and the tool result carries the run id,
+  token, output paths, and exact resume syntax (no blocking UI). Resuming
+  requires the matching token plus `checkpointDecision` (`approve` / `reject`
+  / `revise`); decisions are recorded under `manifest.checkpoints`. `reject`
+  and `revise` finalize the run as `"rejected"` (not auto-resumable); `approve`
+  resumes with a non-empty note injected into remaining steps as USER
+  CHECKPOINT FEEDBACK. Paused runs stay discoverable via `latestIncomplete`.
+- In an iterate step with a collection output, a unit whose agent did not
+  write its per-unit file (e.g. read-only `high`) has the returned text
+  persisted and verified by the dispatcher; failure marks the unit `failed`.
 - Load-time validation failures (unresolvable `reads=`, `iterate=` referencing
   a non-JSON target, `{unit.field}` not present in the enumerate schema) fail
   the run **before any dispatch**: the `pipeline` tool returns the error text
@@ -849,7 +860,9 @@ parent-LLM orchestration, no third-party subagent extension.
 **Drop:** the `@tintinweb/pi-subagents` dependency from the execution path
 (keep the `agents/*.md` profiles; we own their frontmatter contract now).
 Retire `compileRecipeToChain` and its golden fixture (the chain API it
-targeted never existed publicly).
+targeted never existed publicly). — **done in the simplification pass**
+(`compileRecipeToChain`, its dead helpers, and the chain golden-file tests
+were deleted; `tools=`/`maxTools` went with them).
 
 **New module `src/dispatcher.ts`:**
 - `loadAgentProfile(name, agentsDir): AgentProfile` — parse `agents/*.md`

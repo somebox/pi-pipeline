@@ -87,8 +87,9 @@ import {
 	pruneIncompleteToReport,
 	cleanAllRuns,
 	patchManifest,
+	readManifest,
 } from "./workspace.ts";
-import type { WorkspaceInfo, ManifestStep } from "./workspace.ts";
+import type { WorkspaceInfo, ManifestStep, Manifest, CheckpointRecord } from "./workspace.ts";
 import {
 	writeRunReadme,
 	writeMetrics,
@@ -96,7 +97,14 @@ import {
 	writeRootIndex,
 	userFacingSummary,
 } from "./report.ts";
-import { planDelta, recipeHashMismatch, filterUnits } from "./resume.ts";
+import { planDelta, recipeHashMismatch, filterUnits, stepId } from "./resume.ts";
+import {
+	validateResumeDecision,
+	applyCheckpointFeedback,
+	renderPausedResult,
+	renderRejectionResult,
+	renderRevisionResult,
+} from "./checkpoint.ts";
 
 /* ──────────────────────── discovery helper ────────────────────────
  *
@@ -369,13 +377,34 @@ pi.on("before_provider_request", (event) => {
 			resume: Type.Optional(
 				Type.String({
 					description:
-						'Run id or unique prefix to resume. Pass "latest" to resume the newest incomplete run in .pi/pipeline/. Recipe and inputs are loaded from the run manifest.',
+						'Run id or unique prefix to resume. Pass "latest" to resume the newest incomplete run in .pi/pipeline/. Recipe and inputs are loaded from the run manifest. Paused (checkpoint) runs are discoverable as incomplete.',
+				}),
+			),
+			checkpoint: Type.Optional(
+				Type.String({
+					description:
+						"Checkpoint token of a paused run (e.g. 'candidate-sprint'). Must match the run's pending checkpoint. Only valid together with resume on a paused run.",
+				}),
+			),
+			checkpointDecision: Type.Optional(
+				StringEnum(["approve", "reject", "revise"] as const, {
+					description:
+						"Decision for a paused run's pending checkpoint: approve (continue, injecting a non-empty checkpointNote as USER CHECKPOINT FEEDBACK), reject (finalize the run, no later steps), or revise (stop the run and start a fresh run of the same recipe with checkpointNote as steering). Only valid together with resume + checkpoint on a paused run.",
+				}),
+			),
+			checkpointNote: Type.Optional(
+				Type.String({
+					description:
+						"Free-form feedback/steering recorded with the checkpoint decision. For approve it is injected into every remaining step as USER CHECKPOINT FEEDBACK; for revise it becomes the steering of the fresh run.",
 				}),
 			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string>; review?: boolean; resume?: string };
+			const p = params as PipelineParams & { pipeline?: string; inputs?: Record<string, string>; review?: boolean; resume?: string; checkpoint?: string; checkpointDecision?: string; checkpointNote?: string };
+			// The SDK types the tool `signal` as optional; normalize once so the
+			// abort wiring is total (the runtime always provides one).
+			const sig = signal ?? new AbortController().signal;
 			const projectDir = ctx.cwd || process.cwd();
 			const wantsReview = p.review === true || (p.hints ?? []).some((h) => /\b(review|confirm|approve|ask)\b/i.test(h));
 
@@ -421,7 +450,7 @@ pi.on("before_provider_request", (event) => {
 			}
 
 			const resolved = resolvePlan(p);
-			const plan = resolved.plan;
+			let plan = resolved.plan;
 			const effectiveTask = p.task ?? (resolved.name ?? "(unnamed)");
 			let text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, effectiveTask, p.dryRun ?? false);
 
@@ -466,20 +495,73 @@ pi.on("before_provider_request", (event) => {
 			const recipeFile = availableRecipes.find((r) => r.name === resolved.name);
 			const recipeRaw = recipeFile?.raw ?? "";
 			if (resumeWs) {
+				let man: Manifest;
 				try {
-					const man = JSON.parse(fs.readFileSync(resumeWs.manifestPath, "utf-8"));
-					const drift = recipeHashMismatch(man, recipeRaw);
-					if (drift) {
+					man = readManifest(resumeWs.manifestPath);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{ type: "text" as const, text: `**Error:** Could not read run manifest: ${msg}\n` }],
+						details: pipelineDetails(plan, resolved.name, true),
+					};
+				}
+				// Recipe hash drift remains refused even for paused runs.
+				const drift = recipeHashMismatch(man, recipeRaw);
+				if (drift) {
+					return {
+						content: [{ type: "text" as const, text: `**Error:** ${drift}\n` }],
+						details: pipelineDetails(plan, resolved.name, true),
+					};
+				}
+				currentWorkspace = resumeWs;
+				// Checkpoint decision gate: paused runs require a validated
+				// token + decision; reject/revise finalize the run and return.
+				const verdict = validateResumeDecision({
+					manifest: man,
+					plan,
+					checkpoint: p.checkpoint,
+					decision: p.checkpointDecision,
+					note: p.checkpointNote,
+				});
+				if (verdict.kind === "error") {
+					return {
+						content: [{ type: "text" as const, text: `**Error:** ${verdict.error}\n` }],
+						details: pipelineDetails(plan, resolved.name, true),
+					};
+				}
+				if (verdict.kind === "decision") {
+					const record: CheckpointRecord = {
+						step_id: stepId(plan.steps[verdict.stepIndex]!),
+						decision: verdict.decision,
+						decided_at: new Date().toISOString(),
+					};
+					if (verdict.note) record.note = verdict.note;
+					const checkpoints = { ...(man.checkpoints ?? {}), [verdict.token]: record };
+					if (verdict.decision === "approve") {
+						if (verdict.note) plan = applyCheckpointFeedback(plan, verdict.stepIndex, verdict.note);
+						patchManifest(currentWorkspace, { checkpoints, finalized_at: undefined, status: "running" });
+					} else {
+						// reject / revise: record the decision and finalize the old
+						// run without executing later steps.
+						patchManifest(currentWorkspace, { checkpoints });
+						finalizeManifest(currentWorkspace, "rejected");
+						try {
+							writeMetrics(currentWorkspace, readManifest(currentWorkspace.manifestPath));
+							writeRunReadme(currentWorkspace, plan);
+							writeRootIndex(projectDir, listRuns(projectDir));
+						} catch { /* best effort */ }
+						const body = verdict.decision === "reject"
+							? renderRejectionResult(man.run_id, verdict.token, verdict.note)
+							: renderRevisionResult(man.run_id, verdict.token, resolved.name!, verdict.note);
 						return {
-							content: [{ type: "text" as const, text: `**Error:** ${drift}\n` }],
+							content: [{ type: "text" as const, text: body + "\n" }],
 							details: pipelineDetails(plan, resolved.name, true),
 						};
 					}
-				} catch { /* opened below */ }
-				currentWorkspace = resumeWs;
-				try {
+				} else {
+					// Ordinary (non-checkpoint) resume of an incomplete run.
 					patchManifest(currentWorkspace, { finalized_at: undefined, status: "running" });
-				} catch { /* best effort */ }
+				}
 			} else {
 				try { bootstrapGitignore(projectDir); } catch { /* best effort */ }
 				enforceFullWorkspaceCap(projectDir);
@@ -525,12 +607,12 @@ pi.on("before_provider_request", (event) => {
 				aborted = true;
 				if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", "Pipeline abort requested — waiting for current step to stop…");
 			};
-			signal.addEventListener("abort", abortListener, { once: true });
+			sig.addEventListener("abort", abortListener, { once: true });
 
 			// Dispatch each step in order. Iterate steps read their unit list
 			// from the prior step's output; reduce steps read the collection.
 			for (let i = 0; i < plan.steps.length; i++) {
-				if (signal.aborted || aborted) {
+				if (sig.aborted || aborted) {
 					text += "\n\n**Aborted:** Pipeline execution was interrupted before the next step started.\n";
 					break;
 				}
@@ -572,6 +654,18 @@ pi.on("before_provider_request", (event) => {
 						units = filterUnits(units, delta.unitKeys);
 					}
 					if (units.length === 0) {
+						const unitFile = [path.join(currentWorkspace.targetsDir, `${step.iterate}.json`), path.join(projectDir, `${step.iterate}.json`)].find((f) => {
+							try { return fs.existsSync(f); } catch { return false; }
+						});
+						if (unitFile) {
+							// A valid but empty unit list: the step has nothing to do.
+							const empty: StepResult = { status: "completed", text: "0 units — nothing to do", usage: emptyUsage(), durationMs: 0 };
+							recordStepResult(currentWorkspace, stepId, empty, step.outputs?.[0]?.name);
+							lastRunSteps.push({ step: runningMs, result: empty });
+							writeRunReadme(currentWorkspace, plan);
+							text += `\n\nStep ${i + 1}: 0 units (empty \`${step.iterate}\` list) — step completed without dispatch.\n`;
+							continue;
+						}
 						const expected = path.join(currentWorkspace.targetsDir, `${step.iterate}.json`);
 						const err = `Iterate step "${step.phase}" references "${step.iterate}" but no unit list was found. Expected ${expected} to contain either { "items": [...] } or a bare array.`;
 						const failed: StepResult = { status: "failed", text: "", error: err, usage: emptyUsage(), durationMs: 0 };
@@ -590,13 +684,13 @@ pi.on("before_provider_request", (event) => {
 						agentsDir: loaded.agentsDir,
 						modelRegistry,
 						authStorage,
-						abortSignal: signal,
-						onProgress: onUpdate ? (txt: string) => onUpdate({ content: [{ type: "text" as const, text: txt }] }) : undefined,
+						abortSignal: sig,
+						onProgress: onUpdate ? (txt: string) => onUpdate({ content: [{ type: "text" as const, text: txt }], details: {} }) : undefined,
 					};
 					result = units
 						? await dispatchIterate(step, currentWorkspace, loaded.profile, units, opts)
 						: await dispatchStep(step, currentWorkspace, loaded.profile, opts);
-				if (signal.aborted) aborted = true;
+				if (sig.aborted) aborted = true;
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					result = { status: "failed", text: "", error: msg, usage: emptyUsage(), durationMs: 0 };
@@ -613,6 +707,41 @@ pi.on("before_provider_request", (event) => {
 				writeRunReadme(currentWorkspace, plan);
 				if (result.status === "completed") clearScratch(currentWorkspace.scratchRoot);
 
+				// Checkpoint: fires AFTER this step completes. No blocking UI —
+				// persist the run as paused and return the resume instructions.
+				if (step.checkpoint && result.status === "completed") {
+					sig.removeEventListener("abort", abortListener);
+					try {
+						patchManifest(currentWorkspace, { status: "paused" });
+						const man = readManifest(currentWorkspace.manifestPath);
+						const cpStep = man.steps?.find((s: ManifestStep) => s.id === stepId) as ManifestStep | undefined;
+						const outPaths: string[] = [];
+						for (const o of cpStep?.outputs ?? []) {
+							outPaths.push(path.isAbsolute(o.path) ? o.path : path.join(currentWorkspace.dir, o.path));
+						}
+						try { writeMetrics(currentWorkspace, man); } catch { /* best effort */ }
+						writeRunReadme(currentWorkspace, plan);
+						writeRootIndex(projectDir, listRuns(projectDir));
+						text += "\n\n" + renderPausedResult({
+							runId: currentWorkspace.runId,
+							token: step.checkpoint,
+							runDir: currentWorkspace.dir,
+							outputPaths: outPaths,
+							readmePath: currentWorkspace.readmePath,
+						});
+						const costReport = buildCostReport(plan, resolved.name, lastRunSteps, false);
+						text += "\n\n### Execution summary\n" + renderCostReport(costReport).lines.join("\n");
+					} catch (err) {
+						const msg = err instanceof Error ? err.message : String(err);
+						text += `\n\n**Paused at checkpoint \`${step.checkpoint}\`** (run ${currentWorkspace.runId}). ` +
+							`Resume with resume="${currentWorkspace.runId}", checkpoint="${step.checkpoint}", checkpointDecision="approve" | "reject" | "revise". ${msg}\n`;
+					}
+					return {
+						content: [{ type: "text" as const, text }],
+						details: pipelineDetails(plan, resolved.name, false),
+					};
+				}
+
 				// Stop the run on first failure (mirrors the old "subsequent steps blocked" behavior)
 				if (result.status === "failed") {
 					text += `\n\n**Step ${i + 1} failed:** ${result.error ?? "unknown error"}\n`;
@@ -620,7 +749,7 @@ pi.on("before_provider_request", (event) => {
 				}
 			}
 
-			if (aborted || signal.aborted) {
+			if (aborted || sig.aborted) {
 				for (const sid of manifestStepIds) {
 					try {
 						const manifest = JSON.parse(fs.readFileSync(currentWorkspace.manifestPath, "utf-8"));
@@ -633,11 +762,11 @@ pi.on("before_provider_request", (event) => {
 					} catch { /* best effort */ }
 				}
 			}
-			signal.removeEventListener("abort", abortListener);
+			sig.removeEventListener("abort", abortListener);
 
 			let finalized: ReturnType<typeof finalizeManifest> | undefined;
 			try {
-				finalized = finalizeManifest(currentWorkspace, aborted || signal.aborted ? "aborted" : undefined);
+				finalized = finalizeManifest(currentWorkspace, aborted || sig.aborted ? "aborted" : undefined);
 			} catch { /* best effort */ }
 			let metrics;
 			try { metrics = writeMetrics(currentWorkspace, finalized); } catch { /* best effort */ }
@@ -678,7 +807,7 @@ pi.on("before_provider_request", (event) => {
 			if (!trimmed) {
 				ctx.ui.notify(
 					"Usage:\n  /pipeline <recipe-name> <task>\n  /pipeline <task>  (generic, infers mode+effort)\n  /pipeline [mode] [effort] [dryrun] <task>\nBrowse: /pipelines",
-					"warn",
+					"warning",
 				);
 				return;
 			}
@@ -729,7 +858,7 @@ pi.on("before_provider_request", (event) => {
 		handler: async (_args, ctx) => {
 			const report = lastRunReport();
 			if (report.steps.length === 0) {
-				ctx.ui.notify("No pipeline operation recorded yet.", "warn");
+				ctx.ui.notify("No pipeline operation recorded yet.", "warning");
 				return;
 			}
 

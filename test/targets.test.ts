@@ -1,5 +1,5 @@
 /**
- * Unit tests for src/recipes.ts target parsing and validation (Stage 2).
+ * Unit tests for src/recipes.ts target parsing and validation.
  * No fs, no pi imports — pure string/struct tests.
  *
  *   node --test --experimental-strip-types test/targets.test.ts
@@ -13,23 +13,8 @@ import {
 	availableTargets,
 	validatePlanTargets,
 	buildPlanFromRecipe,
-	compileRecipeToChain,
 } from "../src/recipes.ts";
 import type { TargetSpec } from "../src/recipes.ts";
-import { createWorkspace } from "../src/workspace.ts";
-import os from "node:os";
-import path from "node:path";
-import fs from "node:fs";
-
-/* ─── helpers ─── */
-function mkWs() {
-	const tmp = path.join(os.tmpdir(), `pi-pipeline-stage2-${Date.now()}`);
-	const ws = createWorkspace(tmp, "summarize-files");
-	return { tmp, ws };
-}
-function cleanup(tmp: string) {
-	fs.rmSync(tmp, { recursive: true, force: true });
-}
 
 /* ─────────── isLegacyOutput disambiguation ─────────── */
 
@@ -165,202 +150,45 @@ test("validatePlanTargets: allows legacy literal reads without targets", () => {
 	assert.deepEqual(errors, []);
 });
 
-/* ─────────── compileRecipeToChain golden fixture ─────────── */
+/* ─────────── End-to-end: real recipe files parse + validate ─────────── */
 
-test("compileRecipeToChain: target-based summarize-files with workspace", () => {
-	// The fixture from docs/ARTIFACTS.md Compiler output contract (absolute
-	// paths shortened to <ws>/ for readability in assertions).
-	const raw = `---
-name: summarize-files
----
-# summarize-files
-
-## 1. Enumerate files  (util, output=scope:json)
-List every file matching \`{{glob}}\`. Write \`scope\`.
-
-## 2. Summarize each file  (dev, iterate=scope, output=summary-{unit.path})
-For each file in the scope list, read \`{unit.path}\` and write a 100-word summary.
-
-## 3. Merge summaries  (research, reads=summary, output=summaries)
-Read the collected summaries and write the synthesis.
-`;
-	const plan = buildPlanFromRecipe({ raw, nameFallback: "summarize-files" });
-	const { tmp, ws } = mkWs();
-
-	// Validate
-	const errors = validatePlanTargets(plan);
-	assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
-
-	const chain = compileRecipeToChain(plan, ws);
-	assert.equal(chain.length, 3);
-
-	// Step 1 — singleton JSON target
-	const s1 = chain[0];
-	assert.equal(s1.agent, "util");
-	assert.ok(s1.output.endsWith("targets/scope.json"), `s1.output = ${s1.output}`);
-	assert.equal(s1.as, "scope");
-	assert.equal(s1.outputSchema?.type, "object");
-
-	// Step 2 — iterate with collection output
-	const s2 = chain[1];
-	assert.equal(s2.expand.from.output, "scope");
-	assert.ok(s2.parallel.output.includes("collections/summary/summary-{unit.path}.md"), `s2.parallel.output = ${s2.parallel.output}`);
-	assert.equal(s2.collect.as, "summary");
-
-	// Step 3 — reduce step: collection read injected into task text, no reads field
-	const s3 = chain[2];
-	assert.equal(s3.agent, "research");
-	assert.ok(!s3.reads, "reduce step should not have reads array for collection");
-	assert.ok(s3.task.includes("{outputs.summary}"), `s3.task should reference {outputs.summary}: ${s3.task}`);
-	assert.ok(s3.output.endsWith("targets/summaries.md"), `s3.output = ${s3.output}`);
-	assert.equal(s3.as, "summaries");
-
-	cleanup(tmp);
-});
-
-test("compileRecipeToChain: legacy recipe byte-identical without workspace", () => {
-	const raw = `---
-name: x
----
-# x
-
-## 1. One (util, output=scope-files.json)
-A.
-
-## 2. Two (dev, iterate=scope-files, output=summary-{unit}.md)
-B.
-
-## 3. Three (research, reads=summary-*.md, output=summaries.md)
-C.
-`;
-	const plan = buildPlanFromRecipe({ raw, nameFallback: "x" });
-	const chain = compileRecipeToChain(plan);
-	assert.equal(chain.length, 3);
-	assert.equal(chain[0].output, "scope-files.json");
-	assert.equal(chain[1].parallel.output, "summary-{unit.path}.md");
-	assert.deepEqual(chain[1].collect, { as: "collected_scope_files" });
-	assert.deepEqual(chain[2].reads, ["summary-*.md"]);
-	assert.equal(chain[2].output, "summaries.md");
-});
-
-/* ─────────── End-to-end: real migrated recipe files ─────────── */
+import fs from "node:fs";
+import path from "node:path";
 
 function loadRecipeFile(name: string): string {
 	return fs.readFileSync(path.join(import.meta.dirname, "..", "pipelines", `${name}.md`), "utf-8");
 }
 
-test("summarize-files (real file) parses, validates, and compiles with workspace", () => {
+test("summarize-files (real file) parses and validates", () => {
 	const raw = loadRecipeFile("summarize-files");
 	const plan = buildPlanFromRecipe({ raw, nameFallback: "summarize-files" });
 	assert.equal(plan.steps.length, 3, `expected 3 steps, got ${plan.steps.length}`);
-
 	const errors = validatePlanTargets(plan);
 	assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
-
-	const { tmp, ws } = mkWs();
-	const chain = compileRecipeToChain(plan, ws);
-	assert.equal(chain.length, 3);
-	assert.ok(chain[0].output.endsWith("targets/scope.json"), `step 1 output: ${chain[0].output}`);
-	assert.ok(chain[1].parallel.output.includes("collections/summary/"), `step 2 collection: ${chain[1].parallel.output}`);
-	assert.equal(chain[1].collect.as, "summary");
-	assert.ok(chain[2].task.includes("{outputs.summary}"), `step 3 task should reference collection: ${chain[2].task}`);
-	cleanup(tmp);
 });
 
-test("probe (real file) parses, validates, and compiles with workspace", () => {
+test("probe (real file) parses and validates", () => {
 	const raw = loadRecipeFile("probe");
 	const plan = buildPlanFromRecipe({ raw, nameFallback: "probe" });
 	assert.equal(plan.steps.length, 1);
-
 	const errors = validatePlanTargets(plan);
 	assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
-
-	const { tmp, ws } = mkWs();
-	const chain = compileRecipeToChain(plan, ws);
-	assert.equal(chain.length, 1);
-	assert.ok(chain[0].output.endsWith("targets/probe_summary.md"), `step 1 output: ${chain[0].output}`);
-	// project: reads compile to bare paths (no workspace prefix)
-	assert.deepEqual(chain[0].reads, ["AGENTS.md", "go.mod"]);
-	cleanup(tmp);
 });
 
-test("docs-audit (real file) parses, validates, and compiles with workspace", () => {
+test("docs-audit (real file) parses and validates", () => {
 	const raw = loadRecipeFile("docs-audit");
 	const plan = buildPlanFromRecipe({ raw, nameFallback: "docs-audit" });
 	assert.equal(plan.steps.length, 8, `expected 8 steps, got ${plan.steps.length}`);
-
 	const errors = validatePlanTargets(plan);
 	assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
-
-	const { tmp, ws } = mkWs();
-	const chain = compileRecipeToChain(plan, ws);
-	assert.equal(chain.length, 8);
-
-	// Step 1: repo_standards.json (singleton, JSON)
-	assert.ok(chain[0].output.endsWith("targets/repo_standards.json"), `step 1 output: ${chain[0].output}`);
-	assert.equal(chain[0].as, "repo_standards");
-
-	// Step 2: inventory.json (singleton, JSON)
-	assert.ok(chain[1].output.endsWith("targets/inventory.json"), `step 2 output: ${chain[1].output}`);
-	assert.equal(chain[1].as, "inventory");
-
-	// Step 3: iterate over inventory, writes analysis collection
-	assert.equal(chain[2].expand.from.output, "inventory");
-	assert.ok(chain[2].parallel.output.includes("collections/analysis/"), `step 3 collection: ${chain[2].parallel.output}`);
-	assert.equal(chain[2].collect.as, "analysis");
-
-	// Step 4: subject_index singleton (markdown)
-	assert.ok(chain[3].output.endsWith("targets/subject_index.md"), `step 4 output: ${chain[3].output}`);
-
-	// Step 5: reorg_plan.json (singleton, JSON) — the iteration handle for step 6
-	assert.ok(chain[4].output.endsWith("targets/reorg_plan.json"), `step 5 output: ${chain[4].output}`);
-	assert.equal(chain[4].as, "reorg_plan");
-
-	// Step 6: iterate over reorg_plan (phases as items), writes phase_log collection
-	assert.equal(chain[5].expand.from.output, "reorg_plan");
-	assert.ok(chain[5].parallel.output.includes("collections/phase_log/"), `step 6 collection: ${chain[5].parallel.output}`);
-	assert.equal(chain[5].collect.as, "phase_log");
-
-	// Step 7: link_status singleton (markdown)
-	assert.ok(chain[6].output.endsWith("targets/link_status.md"), `step 7 output: ${chain[6].output}`);
-
-	// Step 8: summary singleton (markdown)
-	assert.ok(chain[7].output.endsWith("targets/summary.md"), `step 8 output: ${chain[7].output}`);
-
-	cleanup(tmp);
 });
 
-/* ─────────── Regression: legacy recipes compile unchanged ─────────── */
-
 for (const recipeName of ["code-quality", "verify-source", "housekeeping"]) {
-	test(`${recipeName} (legacy) parses, validates, and compiles identically`, () => {
+	test(`${recipeName} (real file) parses and validates`, () => {
 		const raw = loadRecipeFile(recipeName);
 		const plan = buildPlanFromRecipe({ raw, nameFallback: recipeName });
 		assert.ok(plan.steps.length > 0, `${recipeName} should have steps`);
-
-		// No named-read errors (all reads are legacy literals)
 		const errors = validatePlanTargets(plan);
 		assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
-
-		// Without workspace: legacy compilation
-		const chainNoWs = compileRecipeToChain(plan);
-
-		// With workspace: legacy compilation should be identical
-		const { tmp, ws } = mkWs();
-		const chainWs = compileRecipeToChain(plan, ws);
-		// Legacy compilation should have identical structural fields.
-		// Task text is allowed to differ because Stage 3 injects temp-dir
-		// instructions when a workspace is present.
-		assert.equal(chainWs.length, chainNoWs.length, `${recipeName}: chain length differs`);
-		for (let i = 0; i < chainWs.length; i++) {
-			const a = chainWs[i];
-			const b = chainNoWs[i];
-			assert.equal(a.agent, b.agent, `step ${i} agent`);
-			assert.equal(a.output ?? a.parallel?.output, b.output ?? b.parallel?.output, `step ${i} output`);
-			assert.deepEqual(a.reads ?? a.parallel?.reads, b.reads ?? b.parallel?.reads, `step ${i} reads`);
-			assert.deepEqual(a.as, b.as, `step ${i} as`);
-			assert.deepEqual(a.collect, b.collect, `step ${i} collect`);
-		}
-		cleanup(tmp);
 	});
 }

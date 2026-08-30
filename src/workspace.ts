@@ -32,6 +32,15 @@ export interface ManifestUnitEntry {
 	error?: string;
 }
 
+/** A recorded checkpoint decision on a resumed run. Keyed by checkpoint token
+ *  in `Manifest.checkpoints`. */
+export interface CheckpointRecord {
+	step_id: string;
+	decision: "approve" | "reject" | "revise";
+	note?: string;
+	decided_at: string;
+}
+
 export interface ManifestOutputEntry {
 	name: string;
 	kind: "singleton" | "collection";
@@ -49,6 +58,9 @@ export interface ManifestStep {
 	attempts?: number;
 	durationMs?: number;
 	error?: string;
+	/** Checkpoint token declared by the recipe step; the run pauses after this
+	 *  step completes and records its decision under manifest.checkpoints. */
+	checkpoint?: string;
 	usage?: {
 		input: number;
 		output: number;
@@ -59,7 +71,7 @@ export interface ManifestStep {
 	targets?: Record<string, unknown>;
 }
 
-export type RunStatus = "completed" | "failed" | "partial" | "aborted" | "running";
+export type RunStatus = "completed" | "failed" | "partial" | "aborted" | "running" | "paused" | "rejected";
 
 export interface Manifest {
 	run_id: string;
@@ -75,6 +87,9 @@ export interface Manifest {
 	deliverables: unknown[];
 	finalized_at?: string;
 	status?: RunStatus;
+	/** Checkpoint decisions recorded when a paused run is resumed. Keyed by
+	 *  checkpoint token. */
+	checkpoints?: Record<string, CheckpointRecord>;
 }
 
 export interface RunListing {
@@ -377,7 +392,7 @@ export function findRun(projectDir: string, idOrPrefix: string): { ws: Workspace
 	};
 }
 
-const INCOMPLETE: RunStatus[] = ["aborted", "failed", "partial", "running"];
+const INCOMPLETE: RunStatus[] = ["aborted", "failed", "partial", "running", "paused"];
 
 export function latestIncomplete(projectDir: string): WorkspaceInfo | null {
 	for (const r of listRuns(projectDir)) {
