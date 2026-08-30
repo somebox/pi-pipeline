@@ -14,12 +14,12 @@ illustrates a different shape.
 
 File: [`pipelines/sprint-planning.md`](../pipelines/sprint-planning.md)
 
-The heaviest shipped recipe (11 steps, 2 checkpoints). It discovers the
-repo's planning system (local markdown plans/roadmaps, somebox/cards CLI
+The heaviest shipped recipe (11 steps, 3 checkpoints). It first discovers
+the repo's planning system (local markdown plans/roadmaps, somebox/cards CLI
 when configured, GitHub issues via `gh` when authenticated, filtered
-TODO/FIXME/HACK markers, recent git commits), selects a system of record,
-and collects+scores candidates in one step. It normalizes the approved
-candidates into a capped sprint (at most 20 tasks; overflow becomes
+TODO/FIXME/HACK markers, recent git commits), asks for planning steering, and
+pauses at `checkpoint=planning-steering`. It then collects+scores candidates,
+normalizes them into a capped sprint (at most 20 tasks; overflow becomes
 follow-ups), builds the detailed plan, and pauses at
 `checkpoint=sprint-approved` before any implementation. After approval it
 executes the tasks (one `dev` iterate step with per-task work logs), runs a

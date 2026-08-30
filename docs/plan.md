@@ -27,11 +27,11 @@ done; the next big lever is the overview TUI.**
 - `dispatchIterate` persists a unit's returned text when the agent did not
   write its collection output (read-only `high`), verifies it, and marks the
   unit failed on persistence/verification failure.
-- Shipped `pipelines/sprint-planning.md` — 11 steps, 2 checkpoints
-  (`sprint-approved`, `next-action`); ≤20-task cap; a single execute step with
-  per-task `high` review and a review-driven fix pass; tracker updates only
-  against the detected, confirmed planning system, and only on the
-  user-approved `next-action`.
+- Shipped `pipelines/sprint-planning.md` — 11 steps, 3 checkpoints
+  (`planning-steering`, `sprint-approved`, `next-action`); ≤20-task cap; a
+  single execute step with per-task `high` review and a review-driven fix
+  pass; tracker updates only against the detected, confirmed planning system,
+  and only on the user-approved `next-action`.
 
 **Simplification pass (DONE).** Removed dead/abandoned surfaces: the
 `compileRecipeToChain` pi-subagents chain compiler (and its tests), the

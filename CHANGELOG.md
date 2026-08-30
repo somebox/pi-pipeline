@@ -4,7 +4,14 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.1] — 2026-08-30
+## [0.7.2] — 2026-08-30
+
+### Added
+- **Initial sprint planning steering checkpoint.** `sprint-planning` now pauses after planning-source discovery so the user can confirm scope, inferred priorities, source conflicts, and exclusions before candidates are collected.
+
+### Fixed
+- **Dispatched agent authentication.** Profile directories are now kept separate from the pi config directory, so child sessions load `~/.pi/agent/auth.json` and `models.json` instead of looking beside package `agents/*.md` files.
+- **Failed pipeline fallback safety.** Tool and slash-command instructions now tell the parent model not to manually execute a displayed plan after internal dispatcher failure. Failures are explicitly marked as non-actionable execution errors.
 
 ### Added
 - **Live pipeline progress.** Fan-out steps now report unit starts, completions, failures, elapsed time, and aggregate progress in the pipeline status line. Progress is also persisted to the live run README as units finish.

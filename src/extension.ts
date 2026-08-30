@@ -354,7 +354,7 @@ pi.on("before_provider_request", (event) => {
 		name: "pipeline",
 		label: "Pipeline",
 		description:
-			"Build an effort-scaled multi-agent plan and return it as a numbered sequence of subagent calls. Two ways to pick a pipeline: (1) pass `pipeline` with a recipe name to run a specific opinionated process (e.g. 'code-quality', 'verify-source'); (2) omit it to infer a generic pipeline from the task (mode: research/implementation, effort: surface/standard/deep). Recipes are user/project/package-defined markdown files; call with { action: 'list' } is NOT supported — use the /pipelines command to browse them. The plan shows each step's agent (dev/util/research/high) so the user can see what will run. Use dryRun: true to print the plan without dispatching any subagents.",
+			"Run an effort-scaled multi-agent pipeline. Two ways to pick one: (1) pass `pipeline` with a recipe name to run a specific opinionated process (e.g. 'code-quality', 'verify-source'); (2) omit it to use the generic inferred pipeline (mode: research/implementation, effort: surface/standard/deep). Recipes are user/project/package-defined markdown files; call with { action: 'list' } is NOT supported — use the /pipelines command to browse them. Named recipes execute inside this tool via the owned dispatcher. A checkpoint pauses execution and must be surfaced to the user; do not approve, resume, or manually execute the displayed plan without an explicit user decision. If execution fails, report the error and stop — never hand-execute the returned plan. Use dryRun: true only when you want a plan without dispatching any subagents.",
 		parameters: Type.Object({
 			pipeline: Type.Optional(
 				Type.String({
@@ -639,7 +639,7 @@ pi.on("before_provider_request", (event) => {
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", `Pipeline failed before starting · ${msg}`);
-				text += `\n\n**Error:** Failed to load pi SDK: ${msg}\n`;
+				text += `\n\n**PIPELINE EXECUTION FAILED before dispatch:** ${msg}\n\nDo not manually execute the displayed plan or call subagents as a fallback. Fix the pipeline runtime/authentication issue, then retry the pipeline.\n`;
 				return { content: [{ type: "text" as const, text }], details: pipelineDetails(plan, resolved.name, false) };
 			}
 
@@ -839,7 +839,7 @@ pi.on("before_provider_request", (event) => {
 							}
 						} catch { /* best effort */ }
 					}
-					text += `\n\n**Step ${i + 1} failed:** ${result.error ?? "unknown error"}\n`;
+					text += `\n\n**PIPELINE EXECUTION FAILED at step ${i + 1}:** ${result.error ?? "unknown error"}\n\nDo not manually execute the remaining plan or call subagents as a fallback. Resume this run after fixing the dispatcher issue, or start a fresh run.\n`;
 					break;
 				}
 			}
@@ -917,13 +917,13 @@ pi.on("before_provider_request", (event) => {
 			const recipe = recipes.find((r) => r.name === firstTok);
 			if (recipe) {
 				await pi.sendUserMessage(
-					`Use the pipeline tool with pipeline="${recipe.name}" for this task, then execute the returned plan with subagent calls. Do not stop at planning — run the steps. Report the cost shape from the plan when you summarize the result.\n\nTask: ${rest || "(use the recipe defaults)"}`,
+					`Use the pipeline tool with pipeline="${recipe.name}" for this task. The tool owns execution through its dispatcher; do not manually execute returned steps. If it pauses at a checkpoint, present the checkpoint and wait for the user's explicit decision. If it reports an execution failure, stop and report it rather than falling back to subagent calls. Report the run path, status, and cost when it finishes.\n\nTask: ${rest || "(use the recipe defaults)"}`,
 				);
 				return;
 			}
 			// Generic path: forward the whole string as the task.
 			await pi.sendUserMessage(
-				`Use the pipeline tool for this task, then execute the returned plan with subagent calls. Do not stop at planning — run the steps. Report the cost shape from the plan when you summarize the result.\n\nTask: ${trimmed}`,
+				`Use the pipeline tool for this task. The tool owns execution through its dispatcher; do not manually execute returned steps. If it pauses at a checkpoint, present the checkpoint and wait for the user's explicit decision. If it reports an execution failure, stop and report it rather than falling back to subagent calls. Report the run path, status, and cost when it finishes.\n\nTask: ${trimmed}`,
 			);
 		},
 	});

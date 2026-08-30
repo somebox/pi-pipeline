@@ -21,7 +21,7 @@ This package provides:
 
 Named recipe runs live in `.pi/pipeline/<YYYY-MM-DD-HHMMSS-recipe>/`. Open that folder's `README.md` for status, the step log, time, and cost. Successful runs keep only `README.md` and `metrics.json`.
 4. **Profiles** — `dev`, `util`, `research`, `high`, and `coordinator` — mapped to real models in `settings.json`.
-5. **Recipes** — the package ships `sprint-planning` (an 11-step end-to-end sprint with two approval checkpoints: a plan-approval gate before any implementation, and a final next-action gate that only commits or closes work when explicitly approved), plus `code-quality`, `docs-audit`, `housekeeping`, `probe`, `summarize-files`, and `verify-source`.
+5. **Recipes** — the package ships `sprint-planning` (an 11-step end-to-end sprint with three approval checkpoints: initial planning steering, plan approval before implementation, and a final next-action gate that only commits or closes work when explicitly approved), plus `code-quality`, `docs-audit`, `housekeeping`, `probe`, `summarize-files`, and `verify-source`.
 
 ---
 
