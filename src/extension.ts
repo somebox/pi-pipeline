@@ -46,6 +46,8 @@ import {
 	type PipelineParams,
 	type PipelineCostReport,
 	type Plan,
+	type Profile,
+	STANDARD_PROFILES,
 	buildPlan,
 	summarizeCost,
 	renderPlan,
@@ -55,6 +57,7 @@ import {
 	renderStepAudit,
 	STATIC_STATUS,
 	copyToClipboard,
+	loadTierModels,
 } from "./lib.ts";
 import { buildPlanFromRecipe, validatePlanTargets } from "./recipes.ts";
 import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs, resolvePackageAgentDirs } from "./discovery.ts";
@@ -212,6 +215,29 @@ function emptyUsage(): StepUsage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 }
 
+/** Short display label for a model id: drop a leading `openrouter/` and the
+ *  vendor prefix, keeping the model family (e.g.
+ *  `openrouter/z-ai/glm-5.3` → `glm-5.3`, `openrouter/anthropic/claude-sonnet-5`
+ *  → `claude-sonnet-5`). Falls back to the raw id for anything unexpected. */
+function shortModelLabel(id: string): string {
+	let s = id.trim();
+	if (s.startsWith("openrouter/")) s = s.slice("openrouter/".length);
+	// Drop the vendor segment (e.g. `z-ai/`, `anthropic/`, `qwen/`).
+	const slash = s.indexOf("/");
+	if (slash >= 0) s = s.slice(slash + 1);
+	// Strip a leading `~` (pi's "any auth" marker).
+	return s.replace(/^~/, "");
+}
+
+/** One-line profiles summary derived from settings.json via loadTierModels(),
+ *  e.g. `dev (gpt-5.6-luna), util (qwen3.8-27b), research (gemini-3.7-flash),
+ *  high (glm-5.3)`. Recomputed each session start so settings edits show up
+ *  without a code change. */
+function profilesLine(): string {
+	const tiers = loadTierModels();
+	return STANDARD_PROFILES.map((p: Profile) => `${p} (${shortModelLabel(tiers[p])})`).join(", ");
+}
+
 function lastRunReport(): PipelineCostReport {
 	if (lastRunSteps.length === 0) {
 		return { steps: [] };
@@ -297,7 +323,7 @@ pi.on("session_start", (_event, ctx) => {
 		ctx.ui.setStatus("pipeline", ctx.ui.theme.fg("dim", STATIC_STATUS));
 	}
 	ctx.ui.notify(
-		"Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-runs — list runs in .pi/pipeline/.\n/pipeline-resume [id] — resume an aborted or failed run.\n/pipeline-clean — prune completed workspaces; --failed / --all.\n/pipeline-costs — cost breakdown of the last run.\n/pipeline-audit — per-step audit (tasks/errors/tool-calls/artifacts).\nProfiles: dev (kimi-k2.7), util (minimax-m3), research (glm-5.2), high (sonnet-5).",
+		`Pipeline extension loaded.\n/pipeline <recipe-name> <task> — run a specific recipe (browse with /pipelines).\n/pipeline <task> — generic pipeline, infers mode+effort.\n/pipeline dryrun <task> — show the plan with cost shape, no execution.\n/pipeline-runs — list runs in .pi/pipeline/.\n/pipeline-resume [id] — resume an aborted or failed run.\n/pipeline-clean — prune completed workspaces; --failed / --all.\n/pipeline-costs — cost breakdown of the last run.\n/pipeline-audit — per-step audit (tasks/errors/tool-calls/artifacts).\nProfiles: ${profilesLine()}.`,
 		"info",
 	);
 });
