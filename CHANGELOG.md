@@ -4,6 +4,12 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-08-30
+
+### Added
+- **Live pipeline progress.** Fan-out steps now report unit starts, completions, failures, elapsed time, and aggregate progress in the pipeline status line. Progress is also persisted to the live run README as units finish.
+- **Clearer terminal states.** Status messaging now distinguishes completed, failed, aborted, and paused runs; failed runs mark later unexecuted steps as blocked.
+
 ## [0.7.0] — 2026-08-30
 
 ### Added
