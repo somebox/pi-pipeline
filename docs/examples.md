@@ -80,17 +80,13 @@ Files: [`pipelines/housekeeping.md`](../pipelines/housekeeping.md),
 
 `housekeeping` mirrors `code-quality`'s fixed-checklist shape (util →
 `parallel` dev review → research consolidation → high prioritization) but for
-general technical-debt sweeps. `docs-audit` is the heaviest shipped recipe: an
-eight-step flow that discovers repo standards and auto-generated files,
-enumerates the corpus with git metadata, iterates over each file to summarize
-it and surface topics, builds a subject index, plans a reorganization
-(renames, merges, splits, archives, frontmatter standardization) in named
-phases, executes the plan phase-by-phase, sweeps cross-links and frontmatter,
-and produces a changelog plus user-facing summary. Two iteration phases
-alive at once: `dev, iterate=inventory` for per-file analysis, then
-`dev, iterate=reorg_plan` for per-phase execution. `probe` is a minimal
-single-step recipe used to sanity-check the now-deprecated `maxTools` soft
-budget against an unbounded run — kept as a regression fixture, not a
+general technical-debt sweeps. `docs-audit` is the heaviest shipped recipe: a
+nine-step flow that first asks for cleanup, naming, conflict, and archive
+steering, then inventories and analyzes the corpus, drafts a phased
+reorganization plan, pauses for approval, executes it, reviews the organization
+and key documents with a high-tier pass, applies only concrete review fixes,
+verifies links/frontmatter/README/references, and produces a concise summary.
+`probe` is a minimal single-step recipe used as a regression fixture, not a
 template to copy for new recipes.
 
 ### `screenshot-worklog` — planned iteration over non-files, with a coordinator *(not yet shipped)*

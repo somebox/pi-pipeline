@@ -178,7 +178,7 @@ test("probe (real file) parses and validates", () => {
 test("docs-audit (real file) parses and validates", () => {
 	const raw = loadRecipeFile("docs-audit");
 	const plan = buildPlanFromRecipe({ raw, nameFallback: "docs-audit" });
-	assert.equal(plan.steps.length, 8, `expected 8 steps, got ${plan.steps.length}`);
+	assert.equal(plan.steps.length, 9, `expected 9 steps, got ${plan.steps.length}`);
 	const errors = validatePlanTargets(plan);
 	assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
 });

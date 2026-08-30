@@ -1,129 +1,118 @@
 ---
 name: docs-audit
-description: Comprehensive documentation housekeeping: discover repo standards, inventory and analyze docs, build a subject index, plan a better structure (rename, merge, split, archive, frontmatter), execute in phases, fix cross-links, and produce a changelog + summary.
+description: Review and improve documentation organization, naming, and key documents with user steering before cleanup and a focused reviewer pass.
 inputs:
   - docs_dir
 ---
 
 # docs-audit
 
-**Inputs:** `docs_dir` — the path to the directory containing documentation files to audit and restructure (e.g. `docs`, `~/src/pi-pipeline/docs`).
+**Inputs:** `docs_dir` — the path to the documentation area to audit (for example `docs` or `~/src/project/docs`). Top-level standard files such as `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` are included when relevant.
 
-The flow is **discover → analyze → index → plan → execute → fix → summarize**. The pipeline takes a single `docs_dir` and ends with a project changelog and a user-facing summary. Recency and archive decisions are informed by the git log of each file under audit; linting and publishing config inform the frontmatter/naming standardization.
+## Documentation contract
 
-## 1. Repo standards, layout & auto-generated detection  (util, output=repo_standards:json)
-Scan the repository root and the area around `{{docs_dir}}`. Identify:
-- **Standard top-level files** — `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `LICENSE`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`, `AUTHORS`, etc. Record their paths and a short content excerpt.
-- **Documentation standards already in the repo** — any `docs/STYLE.md`, contributing guide, or in-`README` style notes that document doc conventions.
-- **Linting configuration** — `.markdownlint.{json,yaml,yml,cjs,js}`, `.prettierrc*`, prettier/markdown config inside `package.json`, remark/rehype configs. Note which rules are enabled if you can read them; if a linter is *available* but unconfigured (e.g. `markdownlint-cli` in `devDependencies` with no config), record that too.
-- **Publishing / build setup** — GitHub Pages (`.github/workflows/*pages*` or `actions/deploy-pages`), `mkdocs.yml`/`mkdocs.yaml`, `docusaurus.config.{js,ts}`, Jekyll (`_config.yml`), Antora (`antora-playbook.yml`), mdBook (`book.toml`), etc. Whether the site is published, and how, constrains what we can move/rename without breaking the build.
-- **Auto-generated markdown to exclude from the audit.** Look at the first ~30 lines of each candidate for "auto-generated" / "do not edit" / "this file is generated" markers. Also exclude markdown under `node_modules/`, `dist/`, `build/`, `site/`, `_site/`, `public/`, `vendor/`, `target/`, and any path listed in `.gitignore` that looks like build output. Be conservative: when in doubt, include the file in the audit and let the planning step decide.
-- **The current doc layout** — which directories hold docs, which top-level `.md` files exist, and how files are grouped.
-- **Recent doc-related git activity** — `git log --oneline -10 -- {{docs_dir}}` and the same for top-level `.md` files. This is a freshness signal for the planning step.
+Apply this contract to every recommendation, edit, and review:
 
-Write the `repo_standards` target as JSON with these fields: `standard_files`, `linting`, `publishing`, `auto_generated_excludes`, `layout`, `recent_git_activity`. The `auto_generated_excludes` list is **authoritative** for what step 2 excludes from the audit.
+- Write factual, concise, plain-language documentation. Be casual rather than formal. Do not be wordy, boastful, or exaggerated.
+- Use realistic, relevant code samples when possible. Do not invent APIs or claim that an example was tested when it was not.
+- Use terms consistently across prose, class names, commands, fields, and filenames. Prefer the project's established terms when they are clear.
+- Put a local `README.md` in folders with substantial local knowledge. Use `docs/` for global project overviews and cross-cutting guidance.
+- The main README should explain what the project is for, show useful examples, guide setup and usage, then cover details, contributing, and license.
+- Treat MIT as the default license and public open source status unless the repository explicitly states otherwise. Never change legal terms silently.
+- Give credit and references when the project gained code or inspiration from another project.
+- Preserve useful history. Archive or delete only when the user's steering permits it and the replacement or reason is clear.
 
-## 2. Enumerate docs with metadata  (util, reads=repo_standards, output=inventory:json)
-Build the audit scope. Walk `{{docs_dir}}` and any top-level `.md` files at the repo root. Exclude everything in `repo_standards.auto_generated_excludes`. For every kept file, capture:
-- `path` (relative to repo root)
-- `lines`, `bytes`
-- `last_modified` (`git log -1 --format=%cI -- <path>`)
-- `last_commit_sha` and `last_commit_date`
-- `last_commit_msg`
-- `first_commit_date` (the file's oldest commit)
-- `commit_count` (total commits touching the file)
+## 1. Discover standards and ask for steering  (high, output=steering:json, checkpoint=docs-steering)
+Inspect the repository root and `{{docs_dir}}` enough to understand the existing documentation layout, standard files, publishing/build setup, linting rules, generated-file markers, and obvious conflicts between important documents. Do not edit anything.
 
-Write the `inventory` target as `{ "items": [{ "path": "...", "lines": 123, "last_modified": "...", "last_commit_msg": "...", ... }] }`. This list is the iteration handle for step 3. The `last_commit_msg` field is what step 3 reads to make a freshness judgement — a file untouched for two years is more likely stale than one whose last commit said "fix: refresh outdated section."
+Before any inventory, cleanup, move, archive, or rewrite, present a short **steering brief** for the user. Ask explicitly:
+- How aggressive should cleanup be: **conservative** (fix links/names, preserve questionable docs), **balanced** (archive clear stale/replaced material), or **aggressive** (merge, split, and archive more freely)?
+- Which naming style should be preferred when the repository does not already decide: lowercase-with-dashes, topic folders with local READMEs, or another stated convention?
+- Which conflicting document or source should be treated as authoritative? List each real conflict and the specific decision needed.
+- Should archives stay in the repository, and if so, where?
 
-## 3. Analyze each file  (dev, iterate=inventory, reads=repo_standards, output=analysis-{unit.path})
-For each file in the inventory list:
-- Read `{unit.path}`. Do not read any other file.
-- Write `analysis-{unit.path}.md` containing:
-  - **Summary** — 2-3 sentences: what the file is about, who it serves.
-  - **Topics** — 3-7 short tags naming the main subjects the file covers. Tags are `lowercase-with-dashes`, used by the subject-index step to cluster files. Examples: `cli`, `packaging`, `testing`, `troubleshooting`, `architecture-overview`.
-  - **Purpose** — what problem it solves; the intended reader.
-  - **Freshness** — based on `last_modified` / `commit_count` / `last_commit_msg`, judge whether the file is `current`, `aging`, `stale`, or `abandoned`. Cite the `last_commit_msg` that drove the verdict.
-  - **Quality** — `high` / `acceptable` / `low`, with a one-line reason.
-  - **Size** — `small` / `appropriate` / `oversized` / `trivial`. Files over ~500 lines are `oversized` and candidates to split; under ~30 lines may be `trivial` and candidates to merge.
-  - **Formatting** — frontmatter present? H1 title style, heading hierarchy, code blocks, list style. Note any deviations from the project's own style guide (if `repo_standards` lists one).
-  - **Naming** — does the file follow `lowercase-with-dashes.md`? Is it a recognized standard file (`README`, `LICENSE`, `CONTRIBUTING`, `CHANGELOG`, `CODE_OF_CONDUCT`, `SECURITY`, `SUPPORT`)? Else: classify as `compliant` / `noncompliant` and suggest a renamed path. e.g. `trials_something_test_alpha.md` → `trials/something-test-alpha.md` (or just `trials/something-test.md` if the project prefers dropping the redundant `_test_`); `TrialSOMETHING.md` → `something.md`.
-  - **Issues** — bulleted, with `file:line` references. Note outdated content, broken or fragile links, missing frontmatter, code examples that won't run, etc.
-  - **Suggested improvements** — concrete, minimal suggestions; do not propose rewrites. What should an editor do in 10 minutes?
+Give sensible defaults when the repository has no preference: balanced cleanup, lowercase-with-dashes for non-standard filenames, topic folders with local READMEs where local context is substantial, and archives retained under `docs/archive/`. State that a non-empty `checkpointNote` can answer or override these defaults. Write `steering` as JSON: `{ "standard_files": [...], "layout": "...", "publishing": "...", "linting": "...", "generated_excludes": [...], "conflicts": [{ "documents": ["..."], "decision_needed": "..." }], "questions": ["..."], "defaults": { "cleanup": "balanced", "naming": "lowercase-with-dashes", "archive": "docs/archive/" } }`. The run pauses here; do not begin the audit until the user approves and provides steering.
 
-## 4. Build the subject index  (research, reads=analysis, inventory, repo_standards, output=subject_index)
-Read every `analysis-*.md` plus the `inventory` and `repo_standards` targets. Produce a `subject_index` target (markdown) that contains:
-- **Topic → files map.** For every topic surfaced in step 3, list the files covering it. Group adjacent topics under named clusters (e.g. "Getting started", "Architecture", "Operations", "Contributing"). The clusters are the seed of the new directory structure.
-- **Overlaps.** Files covering the same primary topic — candidates to merge. For each, list the source files, the proposed merged target, and which unique content from each source should survive.
-- **Gaps.** Sub-topics in the project's domain that no current file covers (e.g. a CLI tool with no `troubleshooting.md`, a library with no `upgrading.md`).
-- **Naming & structure issues.** Files whose path or name breaks the project convention; files that live in the wrong directory given what they cover.
-- **Frontmatter inventory.** What frontmatter fields are present across the corpus, which are missing, and which are inconsistent (different ordering, different quoting, different key names for the same concept). Recommend a single frontmatter schema (a list of allowed fields, in order, with allowed-value guidance).
-- **Archive candidates.** Files that look abandoned, low-value, or replaced by another file. For each, justify the recommendation.
-- **Stale-but-keep candidates.** Files that are outdated but still useful; flag for the planning step to mark for a content refresh (not deletion).
+## 2. Inventory documentation  (util, reads=steering, output=inventory:json)
+Read `steering` and build the audit scope. Include `{{docs_dir}}` and relevant top-level standard files. Exclude generated/build/vendor content listed by `steering`, but be conservative when a file is ambiguous. For each file record:
+- `path` relative to the repository root
+- `lines` and `bytes`
+- `last_modified`, `last_commit_sha`, `last_commit_date`, `last_commit_msg`
+- `first_commit_date` and `commit_count`
+- `is_standard_file` and `is_local_readme`
 
-## 5. Plan the restructuring  (high, reads=inventory, analysis, subject_index, repo_standards, output=reorg_plan:json)
-Read every prior target. Design the reorganization. The plan is a comprehensive reorganization, not just a move/split list:
-- **New layout.** The directory structure that better groups files by topic. Use the subject index clusters as the primary grouping; respect the publishing setup (don't break `mkdocs.yml` / `docusaurus.config.*` nav).
-- **File actions.** Per file: `move`, `rename`, `merge` (with target), `split` (with target paths), `archive` (with archive path), `keep`, or `delete`. Each action carries `from_path`, `to_path` (where applicable), and a `reason`. Cover everything — every inventory file gets exactly one action.
-- **Frontmatter standardization.** The single frontmatter schema to apply, and the values for every affected file. If the publishing setup reads frontmatter (Docusaurus, Antora, mkdocs with `mkdocs-material`), the schema must align with what those tools expect.
-- **Naming standardization.** For each noncompliant file, the new path. Standard files (`README`, `LICENSE`, `CONTRIBUTING`, `CHANGELOG`, `CODE_OF_CONDUCT`, `SECURITY`, `SUPPORT`) stay uppercase; everything else is `lowercase-with-dashes`. Subdirectories are topic-grouped, not file-type-grouped (`docs/cli/install.md`, not `docs/markdown/install.md`).
-- **Phased execution.** Group the actions into **phases** that are safe to run independently. Within a phase, actions must not depend on each other (different files, no order dependencies). Between phases, later phases may depend on earlier ones (e.g. delete a file only after its content is merged into the new target; rename a file before another file's link is updated to point at the new path). Each action carries a `verify` clause describing how the executor should confirm success (e.g. "Read new file, confirm frontmatter matches the schema, confirm body is non-empty").
+Write `inventory` as `{ "items": [{ "path": "...", "lines": 123, "bytes": 456, "last_modified": "...", "last_commit_msg": "...", "is_standard_file": true|false, "is_local_readme": true|false }] }`. This list is the iteration handle for step 3.
 
-Write the `reorg_plan` target as JSON. The schema is constrained to `{ items: [{ path }] }` by the JSON target contract, so the iteration handle is the top-level `items` array — each element is a **phase** with its actions embedded:
+## 3. Analyze each document  (research, iterate=inventory, reads=steering, output=analysis-{unit.path})
+For each `{unit.path}`:
+- Read only that document and the steering target. Do not explore unrelated files.
+- Write `analysis-{unit.path}.md` with concise sections: **Purpose and audience**, **topics**, **freshness**, **quality**, **size**, **naming/location**, **links/examples/frontmatter issues**, and **10-minute improvements**.
+- Cite concrete `file:line` references for problems. Distinguish facts from suggestions.
+- Check the documentation contract, especially factual tone, consistent terminology, realistic examples, README placement, and whether the document is global or local knowledge.
+- Classify each file as `keep`, `refresh`, `move`, `merge`, `split`, `archive`, or `delete-candidate`, but do not make the change.
 
-```json
-{
-  "schema_version": 1,
-  "phases": [
-    { "id": "p1", "name": "Frontmatter & naming", "description": "...", "item_count": 3 }
-  ],
-  "items": [
-    { "path": "p1", "name": "Frontmatter & naming", "description": "...", "items": [
-      { "id": "p1-01", "type": "frontmatter", "from": "docs/foo.md", "to": "docs/foo.md", "reason": "...", "verify": "..." },
-      { "id": "p1-02", "type": "naming",      "from": "docs/Old.md",  "to": "docs/old.md",  "reason": "...", "verify": "..." }
-    ]},
-    { "path": "p2", "name": "Moves and merges", "items": [...] }
-  ],
-  "rendered_md": "# Reorganization plan\n\n## Phase 1: ...\n\n..."
-}
-```
+## 4. Draft the reorganization plan  (high, reads=inventory, analysis, steering, output=reorg_plan:json, checkpoint=docs-plan-approved)
+Read the inventory, every analysis, and the user's steering. Produce a practical plan with no unnecessary rewrite work. Include:
 
-- `phases` is a summary list (id, name, description, item_count) for the user-facing rendering.
-- `items` is the iteration handle. Each element is a phase; the `path` field is the phase id (reused as the collection output key). The phase's actions live in the embedded `items` field.
-- `rendered_md` is a human-readable rendering of the same plan (phases, items, reasoning) so the user can skim it; the summary step includes this in the final report.
+- A short current-state summary and the proposed layout.
+- A `key_documents` list identifying the main README, setup/usage docs, architecture or reference documents, contributing/legal files, and any documents central to the conflicts.
+- Exactly one action for every inventory file: `keep`, `edit`, `move`, `rename`, `merge`, `split`, `archive`, or `delete`. Every action has `from`, optional `to`, a factual reason, and a binary verification.
+- Naming decisions and terminology changes, using the user's steering and existing project conventions.
+- README changes: purpose, examples, setup, usage, details, contributing, and license in that order where applicable.
+- Link, frontmatter, code-example, credit/reference, and license checks.
+- Archive/delete safeguards. Do not remove material merely because it is old; identify the replacement or preservation reason.
+- 2–5 independently executable phases. Keep actions that touch the same files in different phases; move/merge before link repair.
 
-The plan author (high-tier) is responsible for:
-- Putting every inventory file in exactly one action.
-- Phases are safe to run independently: in-phase actions touch different files and have no order dependencies.
-- Phase `id`s are simple slugs (`p1`, `p2`, …) — they become the output filename.
+Write JSON as `{ "items": [{ "path": "phase-1", "name": "...", "description": "...", "actions": [{ "id": "...", "type": "...", "from": "...", "to": "...", "reason": "...", "verify": "..." }] }], "key_documents": ["..."], "layout": "...", "terminology": ["..."], "open_decisions": ["..."], "rendered_md": "..." }`. The `items` array is the phase iteration handle. The run pauses here for plan approval; no files are changed before approval.
 
-## 6. Execute the plan  (dev, iterate=reorg_plan, reads=reorg_plan, repo_standards, output=phase_log-{unit.path})
-For each phase in the plan:
-- Read `reorg_plan.json` (the full plan). Find the phase whose `path` matches `{unit.path}`.
-- Process each action in the phase's `items` list **in order**. For each action:
-  - Apply the change using the repo's tooling: `git mv` for moves/renames when possible (preserves history), `edit`/`write` for content changes, `rm` for deletes.
-  - For `merge`, read the source files, write the merged file at `to`, then archive or delete the sources.
-  - For `split`, read the source, write the parts at the listed `to` paths, then archive or delete the source.
-  - For `frontmatter`, apply the standardized schema (add missing fields, normalize order, fix quoting).
-  - For `naming`, `git mv` to the suggested new path.
-- After each action, perform the listed `verify` check (`ls` the new path, `read` the new file's first 20 lines, `git status` to confirm, etc.). Stop and report the issue if a verify fails.
-- After all actions in the phase, verify the phase as a whole (`git status`, confirm the changes match the plan).
-- Write `phase_log-{unit.path}.md` describing what was done, what was verified, and any issues encountered.
+## 5. Execute approved reorganization phases  (dev, iterate=reorg_plan, reads=reorg_plan, steering, output=phase-log-{unit.path})
+For this phase `{unit.path}`, read its embedded `actions` from `reorg_plan`. Apply only the approved actions and the documentation contract:
+- Use `git mv` for moves and renames where possible.
+- For merges and splits, preserve accurate content and references; do not pad documents with prose.
+- Apply targeted edits only. Do not reformat unrelated files.
+- Preserve or create local READMEs only where the plan identifies substantial local knowledge.
+- Respect the steering for cleanup and archives. Never silently change legal terms or delete credited material.
+- Verify each action immediately using its `verify` instruction. Stop and report if verification fails.
 
-The plan's `phases` field is the authoritative ordering. Phases are dispatched in parallel; within a phase, actions are processed sequentially by the same subagent. The plan author is responsible for ensuring no in-phase conflict (different files, no order dependencies).
+Write `phase-log-{unit.path}.md` with changed files, actions completed, verification results, and `Follow-ups:`. If the phase has no actions, record that it was intentionally empty.
 
-## 7. Fix cross-links, frontmatter, titles, references  (research, reads=phase_log, reorg_plan, repo_standards, output=link_status)
-Read every `phase_log-*.md` plus the plan and standards. Sweep the entire docs tree and the main `README.md`:
-- **Cross-links.** Every relative markdown link to a moved/renamed/deleted file is updated; broken links to removed files are deleted or rewritten to the merged target; external links are left alone.
-- **Frontmatter.** Verify every file in the audit scope has the standardized frontmatter. Add missing fields. Normalize field order and quoting.
-- **Titles.** Verify the H1 matches the frontmatter `title` (if present), and matches the canonical project name where relevant.
-- **References.** Verify `CONTRIBUTING.md`, `CHANGELOG.md`, `LICENSE`, etc. are linked from the right places (top-level README, etc.).
-- **Main README.** Verify the main `README.md` (in the repo root) reflects the current docs structure, not the old one. The README is the front door; if the docs moved, the README's table of contents and links must move with them.
+## 6. Review organization and key documents  (high, reads=reorg_plan, phase-log, steering, output=review:json)
+Perform a focused review after the approved phases. Inspect the resulting documentation structure, the main `README.md`, every document in `key_documents`, and the most-touched files listed in the phase logs. Do not review unrelated implementation code.
 
-Apply targeted `edit`s. Write a `link_status` target enumerating what was checked, what was fixed, and any remaining issues the user should know about (e.g. external links that should be updated manually).
+Check:
+- The layout separates global overview from local folder knowledge.
+- The main README explains purpose, examples, setup, usage, details, contributing, and license appropriately.
+- Key documents are concise, factual, plain-language, non-boastful, and consistent in terminology.
+- Code samples are realistic and clearly marked if unverified.
+- Links, filenames, headings, frontmatter, credits, references, and legal statements are correct.
+- The changes follow the user's cleanup, naming, conflict, and archive steering.
 
-## 8. Spot-check, write changelog, summarize  (high, reads=phase_log, link_status, reorg_plan, repo_standards, output=summary)
-Read every prior target. Spot-check a handful of files (including the main `README.md` and the most-touched files in the repo) — confirm the work is consistent and complete.
+Write `review` as `{ "items": [{ "path": "fix-slug", "title": "...", "brief": "smallest concrete fix", "severity": "blocker|major|minor", "verification": "..." }] }`. Include only actionable fixes. An empty list is valid. Do not fix anything in this step.
 
-Write the `summary` target (markdown) with two sections:
-- **Changelog** — a chronological list of what was done, in plain markdown, suitable to drop into the project's own `CHANGELOG.md` (or as a standalone record if the project has no changelog). One bullet per file action (move, rename, merge, split, archive, delete, frontmatter, naming) with the new path.
-- **Summary** — a short, user-facing report: the audit's scope, the main issues found, the actions taken, the new structure, and any open questions for the user. Surface the decisions to take clearly and concretely. Include `reorg_plan.rendered_md` (the human-readable plan) as an appendix so the user can audit what was decided. Do not start implementing.
+## 7. Apply review fixes  (dev, iterate=review, reads=reorg_plan, phase-log, steering, output=review-log-{unit.path})
+Apply exactly this review item: `{unit.path}`. Make the smallest change that addresses its brief. Do not expand the scope or perform unrelated cleanup. Verify it as specified, and write a short log with the changed files, verification result, and any `Follow-ups:`. If the review list is empty, this step completes without dispatch.
+
+## 8. Verify links, README, references, and final consistency  (research, reads=reorg_plan, phase-log, review-log, steering, output=verification)
+Run the repository's available documentation checks once, if configured. Otherwise perform targeted checks:
+- Find broken relative Markdown links and update links after moves/renames.
+- Check headings, filenames, frontmatter, and terminology for consistency.
+- Check the main README against the required purpose → examples → setup → usage → details → contributing → license structure.
+- Check local README placement for folders with substantial local knowledge.
+- Check code samples for obvious invented commands or APIs; do not claim execution without evidence.
+- Check credits and references for borrowed code or inspiration.
+- Check license language and preserve the repository's explicit legal decisions. If no license is stated, report that; do not silently add one.
+
+Fix only small, mechanical issues directly. Report larger issues instead. Write `verification` with commands/checks, results, files changed, remaining issues, and follow-ups.
+
+## 9. Final review and summary  (high, reads=verification, review-log, reorg_plan, steering, output=summary)
+Perform a final factual review of the completed work. Confirm that every planned action was either completed or clearly reported, key documents were reviewed, the main README is useful, links are repaired, terminology is consistent, and no archive/delete decision exceeded the user's steering.
+
+Write a concise `summary` with:
+- **Result** — what changed and the final layout.
+- **Checks** — commands and key results.
+- **Reviewer findings** — fixed items and remaining issues.
+- **Open decisions** — anything that still needs the user.
+- **Changelog** — one plain-language bullet per meaningful file action, suitable for the project's changelog.
+- **Plan appendix** — include `reorg_plan.rendered_md` so the user can audit the decisions.
+
+Do not make further structural changes in this step.
