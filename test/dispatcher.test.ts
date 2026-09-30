@@ -16,6 +16,7 @@ import {
 	loadAgentProfile,
 	loadAgentProfileFromDirs,
 	extractUsageAndStatus,
+	agentErrorText,
 	extractText,
 	buildManifestStep,
 	recordUnitProgress,
@@ -166,6 +167,16 @@ test("extractUsageAndStatus: flags error", () => {
 	];
 	const { hadError } = extractUsageAndStatus(messages);
 	assert.equal(hadError, true);
+});
+
+test("extractUsageAndStatus: keeps the provider error message", () => {
+	const messages = [
+		{ role: "assistant", content: [], stopReason: "error", errorMessage: "400: maximum context length exceeded", usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } },
+	];
+	const { errorMessage } = extractUsageAndStatus(messages);
+	assert.equal(errorMessage, "400: maximum context length exceeded");
+	assert.equal(agentErrorText(errorMessage), "agent error: 400: maximum context length exceeded");
+	assert.equal(agentErrorText(undefined), "agent error");
 });
 
 test("extractUsageAndStatus: flags abort", () => {

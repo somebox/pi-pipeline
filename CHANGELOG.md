@@ -15,6 +15,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - **Runs refuse to start with missing inputs.** A named recipe run is no longer started when a declared input (frontmatter `inputs:`) is missing or blank, or when a step's task still contains a `{{placeholder}}` after substitution (a name the recipe forgot to declare). Previously the agent received the literal `{{name}}` and had to guess. The refusal names the inputs and the `inputs: {...}` to pass, and applies to the `pipeline` tool, `/pipeline`, and resume. Dry runs and `/pipelines` still build the plan and only warn. `/pipeline <recipe>` now tells the model which inputs the recipe requires.
 - **Step headers keep every `reads=` name.** `reads=a, b, c` (with spaces, as `sprint-planning` and `docs-audit` write it) kept only `a`; the rest were dropped as unknown flags. Fourteen shipped steps were missing reads, for example `sprint-planning`'s "Review each task" never received the `worklog` it reviews. The dropped names were also skipped by target validation.
+- **Failed steps report the model error.** A step or unit whose session ended with an error now reports `agent error: <provider message>` (in the tool result, the step log, and the manifest) instead of a bare `agent error`.
 
 ## [0.7.2] — 2026-08-30
 

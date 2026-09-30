@@ -165,14 +165,17 @@ export interface DispatchOpts {
 /* ──────────────────────── helpers ──────────────────────── */
 
 /** Walk a session's messages and return the cumulative usage plus the
- *  terminal status (error/abort) of the run. */
+ *  terminal status (error/abort) of the run. pi's auto-retry removes a
+ *  retried error message, so any error left here is final. */
 export function extractUsageAndStatus(messages: readonly any[]): {
 	usage: StepUsage;
 	hadError: boolean;
 	hadAborted: boolean;
+	errorMessage?: string;
 } {
 	let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0, turns = 0;
 	let hadError = false;
+	let errorMessage: string | undefined;
 	let hadAborted = false;
 	for (const m of messages) {
 		if (m?.role === "assistant") {
@@ -186,7 +189,10 @@ export function extractUsageAndStatus(messages: readonly any[]): {
 				const c = u.cost;
 				if (c) cost += c.total ?? 0;
 			}
-			if (m.stopReason === "error") hadError = true;
+			if (m.stopReason === "error") {
+				hadError = true;
+				if (m.errorMessage) errorMessage = String(m.errorMessage);
+			}
 			if (m.stopReason === "aborted") hadAborted = true;
 		}
 	}
@@ -194,7 +200,13 @@ export function extractUsageAndStatus(messages: readonly any[]): {
 		usage: { input, output, cacheRead, cacheWrite, cost, turns },
 		hadError,
 		hadAborted,
+		...(errorMessage ? { errorMessage } : {}),
 	};
+}
+
+/** Step/unit error text for a session that ended with stopReason "error". */
+export function agentErrorText(errorMessage?: string): string {
+	return errorMessage ? `agent error: ${errorMessage}` : "agent error";
 }
 
 /** Final assistant text content (concatenated text blocks). */
@@ -390,7 +402,7 @@ export async function dispatchStep(
 	try {
 		await session.prompt(task);
 		const messages = session.messages ?? [];
-		const { usage, hadError, hadAborted } = extractUsageAndStatus(messages);
+		const { usage, hadError, hadAborted, errorMessage } = extractUsageAndStatus(messages);
 		const text = extractText(messages);
 		const sessionStatus: StepResult["status"] = hadError || hadAborted ? "failed" : "completed";
 		if (sessionStatus === "completed") persistMissingSingletonOutputs(step, ws, text);
@@ -403,7 +415,7 @@ export async function dispatchStep(
 			durationMs: Date.now() - start,
 		};
 		if (targets) result.targets = targets;
-		if (hadError) result.error = "agent error";
+		if (hadError) result.error = agentErrorText(errorMessage);
 		if (hadAborted) result.error = "aborted";
 		if (outputError) result.error = outputError;
 		return result;
@@ -477,7 +489,7 @@ export async function dispatchIterate(
 			}));
 			await session.prompt(task);
 			const messages = session.messages ?? [];
-			const { usage, hadError, hadAborted } = extractUsageAndStatus(messages);
+			const { usage, hadError, hadAborted, errorMessage } = extractUsageAndStatus(messages);
 			const text = extractText(messages);
 			const r: {
 				key: string; status: "completed" | "failed"; text?: string;
@@ -489,7 +501,7 @@ export async function dispatchIterate(
 				durationMs: Date.now() - slotStart,
 			};
 			if (text) r.text = text;
-			if (hadError) r.error = "agent error";
+			if (hadError) r.error = agentErrorText(errorMessage);
 			if (hadAborted) r.error = "aborted";
 			// Durable per-unit output: if this step declares a collection output
 			// and the agent (e.g. a read-only profile) did not write it, persist
