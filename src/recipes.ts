@@ -204,10 +204,21 @@ export function parseStepHeaderTail(tail: string): { agent: string; parallel: bo
 	let output: string | undefined;
 	let iterate: string | undefined;
 	let checkpoint: string | undefined;
+	// `reads=a, b, c` is split by the `, ` part separator above, so bare parts
+	// (no `=`) right after `reads=` continue the reads list.
+	let inReads = false;
 	for (let i = 1; i < parts.length; i++) {
 		const p = parts[i]!;
+		if (inReads && p !== "parallel" && !p.includes("=")) {
+			reads.push(...p.split(",").map((s) => s.trim()).filter(Boolean));
+			continue;
+		}
+		inReads = false;
 		if (p === "parallel") parallel = true;
-		else if (p.startsWith("reads=")) reads = p.slice(6).split(",").map((s) => s.trim()).filter(Boolean);
+		else if (p.startsWith("reads=")) {
+			reads = p.slice(6).split(",").map((s) => s.trim()).filter(Boolean);
+			inReads = true;
+		}
 		else if (p.startsWith("output=")) output = p.slice(7).trim();
 		else if (p.startsWith("iterate=")) iterate = p.slice(8).trim();
 		else if (p.startsWith("checkpoint=")) {

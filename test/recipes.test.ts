@@ -62,6 +62,18 @@ test("parseStepHeaderTail: agent + parallel + flags", () => {
 	});
 });
 
+test("parseStepHeaderTail: space-separated reads list keeps every name", () => {
+	const h = parseStepHeaderTail("(high, reads=inventory, analysis, steering, output=reorg_plan:json, checkpoint=plan)")!;
+	assert.deepEqual(h.reads, ["inventory", "analysis", "steering"]);
+	assert.equal(h.output, "reorg_plan:json");
+	assert.equal(h.checkpoint, "plan");
+});
+
+test("parseStepHeaderTail: reads continuation stops at parallel and unknown flags", () => {
+	assert.deepEqual(parseStepHeaderTail("(dev, reads=a, b, parallel, c)")!.reads, ["a", "b"]);
+	assert.deepEqual(parseStepHeaderTail("(dev, reads=a, future=x, c)")!.reads, ["a"]);
+});
+
 test("parseStepHeaderTail: custom agent name", () => {
 	assert.deepEqual(parseStepHeaderTail("(my-custom-agent)"), {
 		agent: "my-custom-agent", parallel: false, reads: [], output: undefined, iterate: undefined, checkpoint: undefined,
@@ -183,6 +195,14 @@ test("buildPlanFromRecipe: listing without inputs still builds (placeholders kep
 	const plan = buildPlanFromRecipe({ raw: housekeeping, nameFallback: "hk" });
 	assert.equal(plan.steps.length, 2);
 	assert.match(plan.steps[0].task, /\{\{target_dir\}\}/);
+});
+
+test("shipped recipes: sprint-planning multi-read steps keep all reads", () => {
+	const raw = fs.readFileSync(path.join(import.meta.dirname, "..", "pipelines", "sprint-planning.md"), "utf8");
+	const plan = buildPlanFromRecipe({ raw, nameFallback: "sprint-planning" });
+	const reads = (phase: string) => plan.steps.find((s) => s.phase === phase)?.reads;
+	assert.deepEqual(reads("Review each task"), ["sprint_plan", "worklog"]);
+	assert.deepEqual(reads("File new follow-ups"), ["verification", "worklog", "fixlog", "sprint_tasks", "planning_sources"]);
 });
 
 test("shipped recipes: declared inputs cover every placeholder", () => {
