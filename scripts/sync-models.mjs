@@ -24,6 +24,17 @@ function argValue(name) {
 	return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+/** Does an `enabledModels` pattern cover a `provider/id` model? Exact ids and
+ *  `*`/`?` globs (optionally with a `:thinking` suffix), matched against the
+ *  full id or the id without its provider, case-insensitively — the common
+ *  subset of pi's scope matching. */
+function scopePatternMatches(pattern, model) {
+	if (typeof pattern !== "string") return false;
+	const glob = pattern.replace(/:(off|minimal|low|medium|high|xhigh)$/, "");
+	const re = new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, "i");
+	return re.test(model) || re.test(model.replace(/^[^/]+\//, ""));
+}
+
 const check = process.argv.includes("--check");
 const settingsPath = path.resolve(argValue("--settings") ?? defaultSettingsPath);
 const config = JSON.parse(fs.readFileSync(argValue("--config") ?? configPath, "utf8"));
@@ -65,6 +76,18 @@ for (const [agent, model] of Object.entries(expected)) {
 	if (override.model !== model) {
 		changes.push(`${agent}: ${override.model ?? "(unset)"} → ${model}`);
 		settings.subagents.agentOverrides[agent] = { ...override, model };
+	}
+}
+
+// When settings scope models (`enabledModels`, the /scoped-models list), the
+// pipeline refuses to run a model outside that scope, so add any newly
+// mapped model. Existing entries are never removed.
+if (Array.isArray(settings.enabledModels) && settings.enabledModels.length > 0) {
+	const inScope = (model) => settings.enabledModels.some((pattern) => scopePatternMatches(pattern, model));
+	for (const model of new Set(Object.values(expected))) {
+		if (inScope(model)) continue;
+		settings.enabledModels.push(model);
+		changes.push(`enabledModels: + ${model}`);
 	}
 }
 

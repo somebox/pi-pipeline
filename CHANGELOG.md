@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`optional_inputs:` recipe frontmatter.** Inputs listed there may be omitted and substitute as an empty string. `sprint-planning` now declares `focus` this way, as its text already described it as optional.
 
 ### Changed
+- **Canonical models use OpenRouter `~…-latest` aliases.** `config/models.json` now maps `low` → `~z-ai/glm-flash-latest`, `coding-low` → `~openai/gpt-luna-latest`, `medium` → `~google/gemini-flash-latest`, and `high` → `~openai/gpt-sol-latest`; `worker` and `context-builder` move to `coding-low`, and `planner` to `medium`.
+- **`npm run sync-models` extends `enabledModels`.** When a scope is set, mapped models it does not cover are added (never removed), so a synced mapping always passes the pipeline's scope check. `--check` reports them.
 - **Pipeline models are pinned.** A step's model comes from `settings.json` `subagents.agentOverrides`, then the agent's `model:` frontmatter, then `config/models.json`. The hardcoded fallback models (including `~anthropic/claude-sonnet-latest` for `high`) and the fallback to the first available model in the registry are gone. Before dispatch, a run refuses to start if any agent it uses has no model, names a model missing from the registry, or uses a model outside `enabledModels`. Agent-override `thinking` levels now apply too.
 - **`housekeeping` uses workspace targets.** Its outputs (`inventory.json`, per-area `issues-*.md`, `debt_ledger.md`, and a new `action_plan.md`) now go in the run workspace (`.pi/pipeline/<run-id>/`) instead of the project root. Step 2 iterates the review areas listed in `inventory` instead of relying on the display-only `parallel` flag.
 

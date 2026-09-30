@@ -110,8 +110,13 @@ It covers both pi-pipeline profiles and the generic `pi-subagents` agents
 npm run sync-models
 ```
 
-The script preserves unrelated settings and existing fallback models. Use
-`npm run check-models` to check for drift without writing the settings file.
+The script preserves unrelated settings and existing fallback models. If
+`enabledModels` (the `/scoped-models` list) is set, it also adds any mapped model
+that list does not cover, since the pipeline refuses to run out-of-scope models;
+it never removes entries. Use `npm run check-models` to check for drift without
+writing the settings file. Write model ids with their provider prefix (for
+example `openrouter/~openai/gpt-sol-latest`) so they match `settings.json` and
+`enabledModels` exactly.
 If you change a model mapping, run `/reload` in pi before starting new agents.
 
 Each pipeline step's model is chosen in this order, the same as pi-subagents:

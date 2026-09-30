@@ -1,9 +1,9 @@
 {
   "models": {
-    "low": "openrouter/qwen/qwen3.8-27b",
-    "coding-low": "openrouter/openai/gpt-5.6-luna",
-    "medium": "openrouter/google/gemini-3.7-flash",
-    "high": "openrouter/z-ai/glm-5.3"
+    "low": "openrouter/~z-ai/glm-flash-latest",
+    "coding-low": "openrouter/~openai/gpt-luna-latest",
+    "medium": "openrouter/~google/gemini-flash-latest",
+    "high": "openrouter/~openai/gpt-sol-latest"
   },
   "agents": {
     "dev": "coding-low",
@@ -11,12 +11,12 @@
     "research": "medium",
     "high": "high",
     "scout": "low",
-    "worker": "low",
+    "worker": "coding-low",
     "delegate": "low",
     "researcher": "medium",
-    "context-builder": "medium",
+    "context-builder": "coding-low",
     "reviewer": "high",
     "oracle": "high",
-    "planner": "high"
+    "planner": "medium"
   }
 }
