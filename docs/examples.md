@@ -78,9 +78,11 @@ Files: [`pipelines/housekeeping.md`](../pipelines/housekeeping.md),
 [`pipelines/docs-audit.md`](../pipelines/docs-audit.md),
 [`pipelines/probe.md`](../pipelines/probe.md).
 
-`housekeeping` mirrors `code-quality`'s fixed-checklist shape (util →
-`parallel` dev review → research consolidation → high prioritization) but for
-general technical-debt sweeps. `docs-audit` is the heaviest shipped recipe: a
+`housekeeping` is a general technical-debt sweep over `{{target_dir}}`: a util
+inventory (`inventory:json`, one unit per review area) → an `iterate=inventory`
+dev review per area (`issues-{unit.path}`) → research consolidation
+(`debt_ledger`) → high prioritization (`action_plan`). All outputs stay in the
+run workspace. `docs-audit` is the heaviest shipped recipe: a
 nine-step flow that first asks for cleanup, naming, conflict, and archive
 steering, then inventories and analyzes the corpus, drafts a phased
 reorganization plan, pauses for approval, executes it, reviews the organization

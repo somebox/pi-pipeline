@@ -183,7 +183,19 @@ test("docs-audit (real file) parses and validates", () => {
 	assert.deepEqual(errors, [], `validation errors: ${errors.join("; ")}`);
 });
 
-for (const recipeName of ["code-quality", "verify-source", "housekeeping"]) {
+test("housekeeping (real file) uses workspace targets only", () => {
+	const raw = loadRecipeFile("housekeeping");
+	const plan = buildPlanFromRecipe({ raw, nameFallback: "housekeeping", inputs: { target_dir: "src" } });
+	assert.equal(plan.steps.length, 4);
+	for (const s of plan.steps) assert.ok(s.outputs?.[0], `step "${s.phase}" has a legacy cwd output: ${s.output}`);
+	assert.deepEqual(plan.steps.map((s) => s.outputs![0]!.name), ["inventory", "issues", "debt_ledger", "action_plan"]);
+	assert.equal(plan.steps[1].iterate, "inventory");
+	assert.equal(plan.steps[1].outputs![0]!.kind, "collection");
+	assert.deepEqual(plan.steps[2].reads, ["inventory", "issues"]);
+	assert.deepEqual(validatePlanTargets(plan), []);
+});
+
+for (const recipeName of ["code-quality", "verify-source"]) {
 	test(`${recipeName} (real file) parses and validates`, () => {
 		const raw = loadRecipeFile(recipeName);
 		const plan = buildPlanFromRecipe({ raw, nameFallback: recipeName });

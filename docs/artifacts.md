@@ -16,7 +16,7 @@ using the snapshot below as a release checklist.
 | 1 — workspace + manifest | Done | Flat `.pi/pipeline/<date>-<recipe>/` run folders; README + metrics |
 | 2 — target syntax | Done | `TargetSpec`/`parseOutputSpec`/`validatePlanTargets` + workspace-aware compiler |
 | 3 — temp lifecycle | Done | Per-run `scratch/` (iterate: `scratch/<unit>/`); wiped after a successful step |
-| 4 — recipe migration | Partial | `summarize-files`, `probe`, `docs-audit` migrated; `code-quality`/`verify-source`/`housekeeping` still legacy |
+| 4 — recipe migration | Partial | `summarize-files`, `probe`, `docs-audit`, `housekeeping` migrated; `code-quality`/`verify-source` still legacy |
 | D — own dispatch | Done | Pipeline tool dispatches via pi's first-party `createAgentSession` SDK |
 | 5 — resume/retry | Done | `resume` tool param, `/pipeline-resume`, `planDelta`; `/pipeline-clean` |
 | 6 — external delivery | Not started | Deferred until a real recipe needs it |
@@ -954,11 +954,11 @@ with true step statuses. This is the test that proves the build layer is real.
 
 ### Stage 4 — migrate shipped recipes (after the smoke test)
 
-- ✅ `summarize-files`, `probe`, `docs-audit` migrated
+- ✅ `summarize-files`, `probe`, `docs-audit`, `housekeeping` migrated
 - `renderPlan` legacy tags: tag outputs `(legacy cwd)` when `step.outputs`
   is unset but `step.output` is — makes migration status visible
-- migrate legacy `parallel` recipes (`code-quality`, `verify-source`,
-  `housekeeping`) to `iterate=`. The `<area>`/`<batch>` parent-invented
+- migrate legacy `parallel` recipes (`code-quality`, `verify-source`) to
+  `iterate=` (`housekeeping` done). The `<area>`/`<batch>` parent-invented
   tokens become enumerate steps producing unit lists. Do `verify-source`
   first (simplest), validated by the live-run loop.
 

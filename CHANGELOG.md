@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **`optional_inputs:` recipe frontmatter.** Inputs listed there may be omitted and substitute as an empty string. `sprint-planning` now declares `focus` this way, as its text already described it as optional.
 
+### Changed
+- **`housekeeping` uses workspace targets.** Its outputs (`inventory.json`, per-area `issues-*.md`, `debt_ledger.md`, and a new `action_plan.md`) now go in the run workspace (`.pi/pipeline/<run-id>/`) instead of the project root. Step 2 iterates the review areas listed in `inventory` instead of relying on the display-only `parallel` flag.
+
 ### Fixed
 - **Runs refuse to start with missing inputs.** A named recipe run is no longer started when a declared input (frontmatter `inputs:`) is missing or blank, or when a step's task still contains a `{{placeholder}}` after substitution (a name the recipe forgot to declare). Previously the agent received the literal `{{name}}` and had to guess. The refusal names the inputs and the `inputs: {...}` to pass, and applies to the `pipeline` tool, `/pipeline`, and resume. Dry runs and `/pipelines` still build the plan and only warn. `/pipeline <recipe>` now tells the model which inputs the recipe requires.
 - **Step headers keep every `reads=` name.** `reads=a, b, c` (with spaces, as `sprint-planning` and `docs-audit` write it) kept only `a`; the rest were dropped as unknown flags. Fourteen shipped steps were missing reads, for example `sprint-planning`'s "Review each task" never received the `worklog` it reviews. The dropped names were also skipped by target validation.
