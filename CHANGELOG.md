@@ -4,6 +4,14 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`optional_inputs:` recipe frontmatter.** Inputs listed there may be omitted and substitute as an empty string. `sprint-planning` now declares `focus` this way, as its text already described it as optional.
+
+### Fixed
+- **Runs refuse to start with missing inputs.** A named recipe run is no longer started when a declared input (frontmatter `inputs:`) is missing or blank, or when a step's task still contains a `{{placeholder}}` after substitution (a name the recipe forgot to declare). Previously the agent received the literal `{{name}}` and had to guess. The refusal names the inputs and the `inputs: {...}` to pass, and applies to the `pipeline` tool, `/pipeline`, and resume. Dry runs and `/pipelines` still build the plan and only warn. `/pipeline <recipe>` now tells the model which inputs the recipe requires.
+
 ## [0.7.2] — 2026-08-30
 
 ### Added

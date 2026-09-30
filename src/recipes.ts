@@ -23,6 +23,8 @@ export interface RecipeFrontmatter {
 	name?: string;
 	description?: string;
 	inputs?: string[];
+	/** Inputs that may be omitted; an omitted optional input substitutes as "". */
+	optional_inputs?: string[];
 }
 
 /** A discovered recipe on disk (path + raw text + parsed frontmatter). */
@@ -49,7 +51,7 @@ export interface RecipeBuildInput {
 /* ───────────────────────── frontmatter ───────────────────────── */
 
 /** Parse a leading YAML-ish frontmatter block. Best-effort: only the fields
- *  we use (name, description, inputs), no full YAML. Returns {frontmatter,
+ *  we use (name, description, inputs, optional_inputs), no full YAML. Returns {frontmatter,
  *  body} where body is the markdown without the frontmatter fence. */
 export function parseFrontmatter(raw: string): { frontmatter: RecipeFrontmatter; body: string } {
 	const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
@@ -66,16 +68,16 @@ export function parseFrontmatter(raw: string): { frontmatter: RecipeFrontmatter;
 			const val = kv[2]!.trim();
 			if (currentKey === "name" || currentKey === "description") {
 				if (val) (fm as any)[currentKey] = stripQuotes(val);
-			} else if (currentKey === "inputs") {
-				// inputs is a list; value on this line (if any) ignored, expect `- item` below
-				if (!fm.inputs) fm.inputs = [];
+			} else if (currentKey === "inputs" || currentKey === "optional_inputs") {
+				// a list; value on this line (if any) ignored, expect `- item` below
+				fm[currentKey] ??= [];
 			}
 			continue;
 		}
 		const item = line.match(/^\s+-\s+(.*)$/);
-		if (item && currentKey === "inputs") {
+		if (item && (currentKey === "inputs" || currentKey === "optional_inputs")) {
 			const v = item[1]!.trim();
-			if (v) (fm.inputs ??= []).push(stripQuotes(v));
+			if (v) (fm[currentKey] ??= []).push(stripQuotes(v));
 		}
 	}
 	return { frontmatter: fm, body: body.replace(/^[\r\n]+/, "") };
@@ -247,7 +249,8 @@ export function inferReads(prose: string): string[] {
 /* ───────────────────────── placeholder substitution ───────────────────────── */
 
 /** Substitute {{name}} placeholders from inputs. Missing inputs are left as-is
- *  (the overview TUI surfaces them before run). */
+ *  so `checkRecipeInputs` can report them; a run refuses to start while any
+ *  remain. */
 export function substituteInputs(text: string, inputs?: Record<string, string>): string {
 	if (!inputs) return text;
 	return text.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}/g, (whole, key: string) => {
@@ -306,9 +309,10 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 	const { frontmatter, body } = parseFrontmatter(input.raw);
 	const name = frontmatter.name ?? input.nameFallback;
 	const parsedSteps = parseSteps(body);
+	const inputs = effectiveInputs(frontmatter, input.inputs);
 
 	const steps: PlanStep[] = parsedSteps.map(({ header, task }) => {
-		const resolvedTask = substituteInputs(task, input.inputs);
+		const resolvedTask = substituteInputs(task, inputs);
 		const outputRaw = header.output ?? inferOutput(resolvedTask);
 		// Reads: explicit flag wins; otherwise infer all backticked .md refs and
 		// subtract the output (the file this step writes is not a read).
@@ -359,14 +363,65 @@ export function buildPlanFromRecipe(input: RecipeBuildInput): Plan {
 	};
 }
 
-/** Extract declared inputs from frontmatter (for the overview TUI to prompt). */
+/** Extract the required inputs declared in frontmatter (`inputs:`). */
 export function declaredInputs(raw: string): string[] {
 	return parseFrontmatter(raw).frontmatter.inputs ?? [];
 }
 
-/** Find {{placeholder}} names actually used in the recipe text (a superset
- *  safety check — if a placeholder is used but not declared, the TUI still
- *  knows to prompt for it). */
+/** The supplied inputs plus "" for every omitted optional input. */
+function effectiveInputs(fm: RecipeFrontmatter, inputs?: Record<string, string>): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const name of fm.optional_inputs ?? []) out[name] = "";
+	return { ...out, ...inputs };
+}
+
+export interface InputProblems {
+	/** Required inputs (frontmatter `inputs:`) that were not supplied or are blank. */
+	missing: string[];
+	/** Placeholders still in a step's task after substitution that are not
+	 *  declared inputs — the recipe uses a name it forgot to declare. */
+	undeclared: Array<{ step: number; phase: string; names: string[] }>;
+}
+
+/** Check a recipe invocation's inputs before a run starts. Returns undefined
+ *  when every placeholder resolves. Listing and dry runs may build a plan
+ *  without inputs; only starting a run must pass this check. */
+export function checkRecipeInputs(raw: string, inputs?: Record<string, string>): InputProblems | undefined {
+	const { frontmatter, body } = parseFrontmatter(raw);
+	const required = frontmatter.inputs ?? [];
+	const missing = required.filter((name) => !(inputs?.[name] ?? "").trim());
+	// Blank required inputs count as missing; keep them unsubstituted so they
+	// are not reported twice.
+	const supplied = Object.fromEntries(Object.entries(inputs ?? {}).filter(([k]) => !missing.includes(k)));
+	const resolved = effectiveInputs(frontmatter, supplied);
+	const undeclared: InputProblems["undeclared"] = [];
+	parseSteps(body).forEach(({ header, task }, i) => {
+		const names = usedPlaceholders(substituteInputs(task, resolved)).filter((n) => !missing.includes(n));
+		if (names.length > 0) undeclared.push({ step: i + 1, phase: header.phase, names });
+	});
+	return missing.length > 0 || undeclared.length > 0 ? { missing, undeclared } : undefined;
+}
+
+/** Human-readable refusal for `checkRecipeInputs` problems. */
+export function formatInputProblems(recipeName: string, problems: InputProblems): string {
+	const code = (n: string) => `\`${n}\``;
+	const lines: string[] = [];
+	if (problems.missing.length > 0) {
+		lines.push(`Recipe "${recipeName}" requires input(s) that were not supplied or are empty: ${problems.missing.map(code).join(", ")}.`);
+	}
+	for (const u of problems.undeclared) {
+		lines.push(`Step ${u.step} "${u.phase}" uses placeholder(s) ${u.names.map((n) => code(`{{${n}}}`)).join(", ")} that the recipe does not declare and no input supplied.`);
+	}
+	const names = [...problems.missing, ...problems.undeclared.flatMap((u) => u.names)];
+	const example = JSON.stringify(Object.fromEntries([...new Set(names)].map((n) => [n, "..."])));
+	lines.push(`Pass values in the pipeline tool's \`inputs\` parameter, e.g. \`inputs: ${example}\`. If the task does not say what a value should be, ask the user rather than guessing.`);
+	if (problems.undeclared.length > 0) {
+		lines.push(`If an undeclared placeholder is a recipe bug, declare it under \`inputs:\` (or \`optional_inputs:\`) in the recipe frontmatter.`);
+	}
+	return lines.join("\n");
+}
+
+/** Find {{placeholder}} names actually used in the text. */
 export function usedPlaceholders(raw: string): string[] {
 	const set = new Set<string>();
 	const re = /\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}/g;

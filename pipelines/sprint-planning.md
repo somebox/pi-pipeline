@@ -1,13 +1,13 @@
 ---
 name: sprint-planning
 description: End-to-end sprint. Discovers the repo's planning system, collects and scores candidate work, pauses for plan approval, executes tasks with per-task high reviews and a fix pass, verifies, and pauses for the user's next action.
-inputs:
+optional_inputs:
   - focus
 ---
 
 # sprint-planning
 
-**Inputs:** `focus` — optional focus area for candidate discovery (e.g. "the auth module"). If `{{focus}}` is not substituted, treat the focus as empty (whole project).
+**Inputs:** `focus` — optional focus area for candidate discovery (e.g. "the auth module"). When omitted it is empty; treat an empty focus as the whole project.
 
 Scope cap: the sprint contains **at most 20 tasks**. Everything beyond the cap is routed to follow-ups, never silently dropped. The run pauses at three checkpoints (`planning-steering`, `sprint-approved`, `next-action`) and takes no tracker mutation, implementation, commit, or closing action without an explicit user decision.
 
@@ -22,7 +22,7 @@ Find the repo's standards and its actual planning system. Check each source and 
 For every source report: name, availability, how you checked, its most recent activity, and freshness relative to the repo HEAD date. Note conflicts between sources (e.g. roadmap lists work the issue tracker marks done). Then **select the system of record** — the one most current and most complete — and an explicit **fallback order** for sources used when the primary is unavailable. Justify the selection in 2-4 sentences. Before the run continues, ask the user to confirm or override: the focus and scope, whether inferred priorities are acceptable, which conflicting source is authoritative, and whether any source or category must be excluded. State sensible defaults: whole-project scope, explicit priorities over inferred ones, the freshest complete source of record, and no exclusions. The user can answer with a `checkpointNote`; do not treat the original request to run the pipeline as approval of these decisions. Write the `planning_sources` target as JSON: `{ "items": [{ "path": "<source-name>", "available": true|false, "evidence": "...", "last_activity": "...", "freshness": "current|aging|stale", "notes": "..." }], "head_date": "...", "system_of_record": "<source-name>", "fallback_order": ["..."], "selection_rationale": "...", "steering_questions": ["..."], "defaults": { "scope": "whole project", "priority": "explicit over inferred", "conflicts": "freshest complete source", "exclusions": "none" } }`.
 
 ## 2. Collect and score candidates  (research, reads=planning_sources, output=scored:json)
-Read `planning_sources` and the `USER CHECKPOINT FEEDBACK` from the planning-steering approval. Apply the user's scope, conflict, priority, and exclusion decisions; if the note is empty, use the recorded defaults. Pull candidate work items from the selected system of record, then from the fallback-order sources, plus the filtered TODO/FIXME/HACK markers and anything recent git commits left unfinished. Cap at 40 candidates; prefer the most relevant to the focus: `{{focus}}`. For each candidate record a stable slug, title, source (which system it came from), location (file:line or issue/card id), and whether its priority is **explicit** (stated in the source) or **inferred** (by you — say why).
+Read `planning_sources` and the `USER CHECKPOINT FEEDBACK` from the planning-steering approval. Apply the user's scope, conflict, priority, and exclusion decisions; if the note is empty, use the recorded defaults. Pull candidate work items from the selected system of record, then from the fallback-order sources, plus the filtered TODO/FIXME/HACK markers and anything recent git commits left unfinished. Cap at 40 candidates; prefer the most relevant to the focus (empty means the whole project): `{{focus}}`. For each candidate record a stable slug, title, source (which system it came from), location (file:line or issue/card id), and whether its priority is **explicit** (stated in the source) or **inferred** (by you — say why).
 
 Score every candidate on: **clarity** (is the task understandable as written), **freshness / not-abandoned** (is it still live work, not stale), **priority** (explicit or inferred — mark inference explicitly), **blockers** (what would prevent starting), **acceptance criteria** (can you state how "done" is verified), and **plannability** (can it become a small, verifiable task this sprint). Give each a 0-5 score per dimension plus a total, and rank them. Write the `scored` target as JSON: `{ "items": [{ "path": "<slug>", "title": "...", "source": "...", "location": "...", "priority": "explicit|inferred", "priority_basis": "...", "clarity": 0, "freshness": 0, "priority_score": 0, "blockers": "...", "acceptance": "...", "plannability": 0, "total": 0, "rank": 1 }] }`.
 

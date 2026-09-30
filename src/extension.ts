@@ -59,7 +59,7 @@ import {
 	copyToClipboard,
 	loadTierModels,
 } from "./lib.ts";
-import { buildPlanFromRecipe, validatePlanTargets } from "./recipes.ts";
+import { buildPlanFromRecipe, checkRecipeInputs, declaredInputs, formatInputProblems, validatePlanTargets } from "./recipes.ts";
 import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs, resolvePackageAgentDirs } from "./discovery.ts";
 import {
 	loadAgentProfileFromDirs,
@@ -173,12 +173,13 @@ let lastRunSteps: Array<{ step: ManifestStep; result: StepResult }> = [];
  *
  * Resolve a `pipeline` tool invocation to a Plan. If `pipeline` (a recipe
  * name) is given, load it from the discovered recipes; else fall back to the
- * generic built-in inference path (mode/effort). Returns {plan, name?, error?}.
+ * generic built-in inference path (mode/effort). Returns {plan, name?, error?, blocked?}.
  */
 interface ResolvedPlan {
 	plan: Plan;
 	name?: string;       // recipe name, if a named recipe was used
-	error?: string;       // human-readable error when the plan couldn't be built
+	error?: string;       // human-readable error when the plan couldn't be built (shown, non-blocking)
+	blocked?: string;     // reason the run must not start (missing inputs / unresolved placeholders)
 }
 
 function resolvePlan(input: PipelineParams & { pipeline?: string; inputs?: Record<string, string> }): ResolvedPlan {
@@ -198,10 +199,12 @@ function resolvePlan(input: PipelineParams & { pipeline?: string; inputs?: Recor
 			hints: input.hints,
 		});
 		const validation = validatePlanTargets(plan);
+		const inputProblems = checkRecipeInputs(recipe.raw, input.inputs);
 		return {
 			plan,
 			name: recipe.name,
 			error: validation.length > 0 ? validation.join("; ") : undefined,
+			blocked: inputProblems ? formatInputProblems(recipe.name, inputProblems) : undefined,
 		};
 	}
 	return { plan: buildPlan(input) }; // generic inference path
@@ -368,7 +371,7 @@ pi.on("before_provider_request", (event) => {
 			),
 			inputs: Type.Optional(
 				Type.Record(Type.String(), Type.String(), {
-					description: "Named inputs for a recipe's {{placeholders}} (e.g. { scope: 'frontend code' }). Optional — placeholders can also be inferred from the task.",
+					description: "Named inputs for a recipe's {{placeholders}} (e.g. { scope: 'frontend code' }). Required for every input the recipe declares: a run refuses to start while a declared input is missing or empty, or a {{placeholder}} is left unresolved. Extract values from the user's request; ask the user if a value is not given.",
 				}),
 			),
 			effort: Type.Optional(
@@ -479,7 +482,18 @@ pi.on("before_provider_request", (event) => {
 			const resolved = resolvePlan(p);
 			let plan = resolved.plan;
 			const effectiveTask = p.task ?? (resolved.name ?? "(unnamed)");
-			let text = (resolved.error ? `**Note:** ${resolved.error}\n\n` : "") + renderPlan(plan, effectiveTask, p.dryRun ?? false);
+			// Missing inputs block every launch path (tool call, /pipeline, resume)
+			// before any workspace is created. A dry run only shows the problem.
+			if (resolved.blocked && !p.dryRun) {
+				const resumeHint = resumeWs ? "\n\nThis run's manifest does not supply them either; start a fresh run with `inputs` instead of resuming." : "";
+				return {
+					content: [{ type: "text" as const, text: `**Error: pipeline not started.** ${resolved.blocked}${resumeHint}\n` }],
+					details: pipelineDetails(plan, resolved.name, true),
+				};
+			}
+			let text = (resolved.blocked ? `**Warning:** ${resolved.blocked}\n\n` : "")
+				+ (resolved.error ? `**Note:** ${resolved.error}\n\n` : "")
+				+ renderPlan(plan, effectiveTask, p.dryRun ?? false);
 
 			// Surface available recipes so the LLM (and user) can discover them
 			// without running /pipelines separately.
@@ -916,8 +930,12 @@ pi.on("before_provider_request", (event) => {
 			const rest = trimmed.slice(firstTok.length).trim();
 			const recipe = recipes.find((r) => r.name === firstTok);
 			if (recipe) {
+				const required = declaredInputs(recipe.raw);
+				const inputsNote = required.length > 0
+					? ` This recipe requires inputs: ${required.map((n) => `\`${n}\``).join(", ")}. Pass them in the tool's \`inputs\` parameter, taking values from the task below; if the task does not give a value, ask the user instead of guessing.`
+					: "";
 				await pi.sendUserMessage(
-					`Use the pipeline tool with pipeline="${recipe.name}" for this task. The tool owns execution through its dispatcher; do not manually execute returned steps. If it pauses at a checkpoint, present the checkpoint and wait for the user's explicit decision. If it reports an execution failure, stop and report it rather than falling back to subagent calls. Report the run path, status, and cost when it finishes.\n\nTask: ${rest || "(use the recipe defaults)"}`,
+					`Use the pipeline tool with pipeline="${recipe.name}" for this task.${inputsNote} The tool owns execution through its dispatcher; do not manually execute returned steps. If it pauses at a checkpoint, present the checkpoint and wait for the user's explicit decision. If it reports an execution failure, stop and report it rather than falling back to subagent calls. Report the run path, status, and cost when it finishes.\n\nTask: ${rest || "(use the recipe defaults)"}`,
 				);
 				return;
 			}

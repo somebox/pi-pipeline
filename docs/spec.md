@@ -26,10 +26,19 @@ collision):
 ---
 name: code-quality           # defaults to filename stem
 description: one-line, shown by the TUI list
-inputs:                      # optional; documents placeholders
+inputs:                      # required {{placeholders}}
   - scope
+optional_inputs:             # may be omitted; substitute as ""
+  - focus
 ---
 ```
+
+Every name under `inputs:` is required. A run refuses to start (from the
+`pipeline` tool, `/pipeline`, or a resume) when a required input is missing
+or blank, or when a step's task still contains a `{{name}}` after
+substitution (a placeholder the recipe forgot to declare). The refusal names
+the inputs and shows the `inputs: {...}` to pass. Listing (`/pipelines`) and
+dry runs still build the plan and only warn.
 
 `mode`/`effort` are **not** accepted for named recipes — a recipe is a
 complete process. (They remain on the generic built-in path only.)
@@ -72,8 +81,8 @@ The section's body paragraphs are the task text, verbatim.
   from the invocation's `inputs`. Double braces.
 - `{unit}` / `{unit.field}` — **per-unit** placeholder, substituted once per
   dispatch in an iterate step. Single braces distinguish them from `{{input}}`
-  placeholders (substituted once at plan-build time). Missing inputs are
-  surfaced by the overview TUI; a missing `{unit.field}` (e.g. the step
+  placeholders (substituted once at plan-build time). Missing inputs
+  block the run (see **Frontmatter**); a missing `{unit.field}` (e.g. the step
   references `{unit.mtime}` but the enumerate step's objects have no `mtime`)
   is a **validation error at load time**, not a silent no-op.
 

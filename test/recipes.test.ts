@@ -1,14 +1,17 @@
 /**
- * Unit tests for src/recipes.ts (recipe parser). No pi imports, no fs, no stubs.
+ * Unit tests for src/recipes.ts (recipe parser). No pi imports, no stubs. The
+ * only fs use is reading the shipped pipelines/*.md for the inputs check.
  *
  *   node --test --experimental-strip-types test/recipes.test.ts
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import {
 	parseFrontmatter, parseStepHeaderTail, inferOutput, inferReads,
 	substituteInputs, parseSteps, buildPlanFromRecipe, declaredInputs,
-	usedPlaceholders,
+	usedPlaceholders, checkRecipeInputs, formatInputProblems,
 } from "../src/recipes.ts";
 import { renderPlan } from "../src/lib.ts";
 
@@ -108,6 +111,87 @@ test("usedPlaceholders: collects all {{names}}", () => {
 
 test("declaredInputs: from frontmatter", () => {
 	assert.deepEqual(declaredInputs("---\ninputs:\n  - a\n  - b\n---\n# x"), ["a", "b"]);
+});
+
+/* ───────────────────────── input checks ───────────────────────── */
+
+const housekeeping = `---
+name: housekeeping
+inputs:
+  - target_dir
+---
+
+# housekeeping
+
+## 1. Inventory  (util)
+Scan the directory \`{{target_dir}}\`. Write \`inventory.md\`.
+
+## 2. Review  (dev)
+Read \`inventory.md\`. Write \`issues.md\`.
+`;
+
+test("checkRecipeInputs: missing declared input blocks, message names it and how to pass it", () => {
+	const problems = checkRecipeInputs(housekeeping);
+	assert.deepEqual(problems, { missing: ["target_dir"], undeclared: [] });
+	const msg = formatInputProblems("housekeeping", problems!);
+	assert.match(msg, /`target_dir`/);
+	assert.match(msg, /inputs: \{"target_dir":"\.\.\."\}/);
+});
+
+test("checkRecipeInputs: other inputs supplied, declared one absent -> still missing", () => {
+	assert.deepEqual(checkRecipeInputs(housekeeping, { scope: "x" })?.missing, ["target_dir"]);
+});
+
+test("checkRecipeInputs: empty or whitespace-only input counts as missing", () => {
+	assert.deepEqual(checkRecipeInputs(housekeeping, { target_dir: "" }), { missing: ["target_dir"], undeclared: [] });
+	assert.deepEqual(checkRecipeInputs(housekeeping, { target_dir: "   " }), { missing: ["target_dir"], undeclared: [] });
+});
+
+test("checkRecipeInputs: supplied input passes and is substituted", () => {
+	assert.equal(checkRecipeInputs(housekeeping, { target_dir: "~/src/cards" }), undefined);
+	const plan = buildPlanFromRecipe({ raw: housekeeping, nameFallback: "hk", inputs: { target_dir: "~/src/cards" } });
+	assert.match(plan.steps[0].task, /Scan the directory `~\/src\/cards`/);
+});
+
+test("checkRecipeInputs: undeclared placeholder left after substitution is flagged", () => {
+	const raw = housekeeping.replace("Read \`inventory.md\`.", "Read \`inventory.md\` for {{area}}.");
+	const problems = checkRecipeInputs(raw, { target_dir: "src" });
+	assert.deepEqual(problems, { missing: [], undeclared: [{ step: 2, phase: "Review", names: ["area"] }] });
+	const msg = formatInputProblems("housekeeping", problems!);
+	assert.match(msg, /Step 2 "Review" uses placeholder\(s\) `\{\{area\}\}`/);
+	assert.match(msg, /does not declare/);
+	// Supplying the undeclared name resolves it.
+	assert.equal(checkRecipeInputs(raw, { target_dir: "src", area: "api" }), undefined);
+});
+
+test("checkRecipeInputs: missing declared input is not also reported as undeclared", () => {
+	assert.deepEqual(checkRecipeInputs(housekeeping, {})?.undeclared, []);
+});
+
+test("checkRecipeInputs: omitted optional input passes and substitutes as empty", () => {
+	const raw = "---\noptional_inputs:\n  - focus\n---\n# x\n\n## 1. Collect  (util)\nPrefer the focus: `{{focus}}`.";
+	assert.equal(checkRecipeInputs(raw), undefined);
+	assert.deepEqual(parseFrontmatter(raw).frontmatter.optional_inputs, ["focus"]);
+	assert.deepEqual(declaredInputs(raw), []);
+	const plan = buildPlanFromRecipe({ raw, nameFallback: "x" });
+	assert.match(plan.steps[0].task, /Prefer the focus: ``\./);
+	const withFocus = buildPlanFromRecipe({ raw, nameFallback: "x", inputs: { focus: "auth" } });
+	assert.match(withFocus.steps[0].task, /Prefer the focus: `auth`\./);
+});
+
+test("buildPlanFromRecipe: listing without inputs still builds (placeholders kept)", () => {
+	const plan = buildPlanFromRecipe({ raw: housekeeping, nameFallback: "hk" });
+	assert.equal(plan.steps.length, 2);
+	assert.match(plan.steps[0].task, /\{\{target_dir\}\}/);
+});
+
+test("shipped recipes: declared inputs cover every placeholder", () => {
+	const dir = path.join(import.meta.dirname, "..", "pipelines");
+	for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
+		const raw = fs.readFileSync(path.join(dir, file), "utf8");
+		const inputs = Object.fromEntries(declaredInputs(raw).map((n) => [n, "value"]));
+		assert.equal(checkRecipeInputs(raw, inputs), undefined, file);
+	}
 });
 
 /* ───────────────────────── step parsing ───────────────────────── */
