@@ -14,6 +14,7 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { TargetSpec } from "./recipes.ts";
 
 /** Default location of the pi settings file. Overridable for tests. */
@@ -506,31 +507,74 @@ export function fallbacksFor(modelId: string | undefined, filePath: string = DEF
  * restart is still recommended so pi-subagents' own mapping is consistent.
  */
 
-export const DEFAULT_TIER_MODELS: Record<Profile, string> = {
-	dev: "openrouter/qwen/qwen3.8-27b",
-	util: "openrouter/minimax/minimax-m3",
-	research: "openrouter/z-ai/glm-5.3",
-	high: "openrouter/~anthropic/claude-sonnet-latest",
-};
+/** The package's canonical agent→model map (`config/models.json`, the same
+ *  file `npm run sync-models` writes into settings.json). Used only when
+ *  settings.json has no override for an agent — never a hardcoded model. */
+export const CANONICAL_MODELS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "config", "models.json");
+
+/** Read `config/models.json` as agent → model id. Missing/invalid → {}. */
+export function loadCanonicalModels(filePath: string = CANONICAL_MODELS_PATH): Record<string, string> {
+	const out: Record<string, string> = {};
+	try {
+		const cfg = JSON.parse(fs.readFileSync(filePath, "utf8"));
+		for (const [agent, alias] of Object.entries(cfg?.agents ?? {})) {
+			const model = typeof alias === "string" ? cfg?.models?.[alias] : undefined;
+			if (typeof model === "string" && model.trim()) out[agent] = model.trim();
+		}
+	} catch { /* no canonical map → settings.json must pin every agent */ }
+	return out;
+}
+
+/** Canonical model per standard profile (from config/models.json). */
+export const DEFAULT_TIER_MODELS: Partial<Record<Profile, string>> = (() => {
+	const all = loadCanonicalModels();
+	const out: Partial<Record<Profile, string>> = {};
+	for (const p of STANDARD_PROFILES) if (all[p]) out[p] = all[p];
+	return out;
+})();
+
+/** Parsed pi settings.json. `error` is set when the file exists but cannot
+ *  be read or parsed; a missing file is not an error. */
+export function readPiSettings(filePath: string = DEFAULT_SETTINGS_PATH): { settings: any; error?: string } {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(filePath, "utf8");
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return { settings: {} };
+		return { settings: {}, error: `Could not read ${filePath}: ${err?.message ?? err}` };
+	}
+	try {
+		return { settings: JSON.parse(raw) ?? {} };
+	} catch (err: any) {
+		return { settings: {}, error: `Could not parse ${filePath}: ${err?.message ?? err}` };
+	}
+}
+
+/** `subagents.agentOverrides.<agent>` model/thinking from settings, if set. */
+export function agentOverride(settings: any, agent: string): { model?: string; thinking?: string } {
+	const o = settings?.subagents?.agentOverrides?.[agent];
+	const out: { model?: string; thinking?: string } = {};
+	if (typeof o?.model === "string" && o.model.trim()) out.model = o.model.trim();
+	if (typeof o?.thinking === "string" && o.thinking.trim()) out.thinking = o.thinking.trim();
+	return out;
+}
+
+/** The `enabledModels` scope patterns (`/scoped-models`), or undefined. */
+export function enabledModelPatterns(settings: any): string[] | undefined {
+	const e = settings?.enabledModels;
+	return Array.isArray(e) && e.length > 0 ? e.filter((x: unknown): x is string => typeof x === "string") : undefined;
+}
 
 /** Read the tier→model map from the live ~/.pi/agent/settings.json
- *  `subagents.agentOverrides.<tier>.model`. Falls back to the defaults.
- *  Not memoized: re-read each dispatch so edits to settings.json take
- *  effect on the next subagent call even in a stale parent process. */
-export function loadTierModels(filePath: string = DEFAULT_SETTINGS_PATH): Record<Profile, string> {
-	const out: Record<Profile, string> = { ...DEFAULT_TIER_MODELS };
-	try {
-		const raw = fs.readFileSync(filePath, "utf8");
-		const parsed = JSON.parse(raw);
-		const ao = parsed?.subagents?.agentOverrides;
-		if (ao && typeof ao === "object") {
-			for (const k of STANDARD_PROFILES) {
-				const m = ao[k]?.model;
-				if (typeof m === "string" && m.trim()) out[k] = m.trim();
-			}
-		}
-	} catch {
-		/* missing/unreadable/unparsable settings → use defaults */
+ *  `subagents.agentOverrides.<tier>.model`, falling back to the canonical
+ *  `config/models.json`. Not memoized: re-read each dispatch so edits to
+ *  settings.json take effect on the next call even in a stale parent. */
+export function loadTierModels(filePath: string = DEFAULT_SETTINGS_PATH): Partial<Record<Profile, string>> {
+	const out: Partial<Record<Profile, string>> = { ...DEFAULT_TIER_MODELS };
+	const { settings } = readPiSettings(filePath);
+	for (const k of STANDARD_PROFILES) {
+		const m = agentOverride(settings, k).model;
+		if (m) out[k] = m;
 	}
 	return out;
 }
@@ -1297,11 +1341,11 @@ export function renderPlan(plan: Plan, task: string, dryRun: boolean): string {
  *  (parallel), and `chain` (incl. `parallel` fanout groups) shapes. */
 export function injectTierModels(
 	input: Record<string, any>,
-	tierModels: Record<Profile, string>,
+	tierModels: Partial<Record<Profile, string>>,
 ): Record<string, any> {
 	const inject = (entry: Record<string, any>) => {
 		const a = entry["agent"];
-		if (isTierAgent(a) && !entry["model"]) entry["model"] = tierModels[a];
+		if (isTierAgent(a) && !entry["model"] && tierModels[a]) entry["model"] = tierModels[a];
 	};
 	if (Array.isArray(input["tasks"])) {
 		for (const t of input["tasks"]) if (t && typeof t === "object") inject(t as Record<string, any>);

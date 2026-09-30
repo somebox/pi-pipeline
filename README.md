@@ -113,3 +113,21 @@ npm run sync-models
 The script preserves unrelated settings and existing fallback models. Use
 `npm run check-models` to check for drift without writing the settings file.
 If you change a model mapping, run `/reload` in pi before starting new agents.
+
+Each pipeline step's model is chosen in this order, the same as pi-subagents:
+
+1. `subagents.agentOverrides.<agent>.model` (and `.thinking`) in `~/.pi/agent/settings.json`
+2. `model:` in the agent file's frontmatter
+3. `config/models.json` in this package
+
+There is no other fallback. Before a run dispatches anything, it resolves the
+model for every agent the plan uses and refuses to start if an agent has no
+model, a model is missing from pi's registry, `settings.json` cannot be parsed,
+or a model is outside `enabledModels` (the `/scoped-models` list, matched with
+pi's own pattern rules). The tool output lists the model chosen for each agent.
+
+Every step records its model, thinking level, duration, tokens, and cost in the
+run manifest, `metrics.json` (with a `by_model` rollup), the run `README.md`,
+and `logs/NN-<step>.md`. When the provider serves a different model than the one
+requested (for example an OpenRouter `~…-latest` alias), the served model is
+recorded as well.

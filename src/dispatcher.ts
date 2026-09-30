@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { loadTierModels } from "./lib.ts";
+import { agentOverride, DEFAULT_SETTINGS_PATH, enabledModelPatterns, loadCanonicalModels, readPiSettings } from "./lib.ts";
 import type { PlanStep } from "./lib.ts";
 import type { WorkspaceInfo } from "./workspace.ts";
 import { readManifest, updateManifestStep, type ManifestStep, type ManifestUnitEntry } from "./workspace.ts";
@@ -132,6 +132,12 @@ export interface StepResult {
 	units?: Array<ManifestUnitEntry & { text?: string; error?: string; usage?: StepUsage; durationMs?: number }>;
 	/** Named singleton outputs parsed from files the step wrote. */
 	targets?: Record<string, unknown>;
+	/** Registry model the step was dispatched on (`provider/id`). */
+	model?: string;
+	thinking?: string;
+	/** Models the provider reported serving, when they differ from `model`
+	 *  (e.g. an OpenRouter alias resolving to a dated model). */
+	responseModels?: string[];
 }
 
 export interface PipelineProgress {
@@ -172,14 +178,19 @@ export function extractUsageAndStatus(messages: readonly any[]): {
 	hadError: boolean;
 	hadAborted: boolean;
 	errorMessage?: string;
+	/** Distinct `provider/model` values the provider reported serving. */
+	responseModels: string[];
 } {
 	let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0, turns = 0;
 	let hadError = false;
 	let errorMessage: string | undefined;
 	let hadAborted = false;
+	const responseModels = new Set<string>();
 	for (const m of messages) {
 		if (m?.role === "assistant") {
 			turns += 1;
+			const served = m.responseModel ?? m.model;
+			if (typeof served === "string" && served) responseModels.add(m.provider ? `${m.provider}/${served}` : served);
 			const u = m.usage;
 			if (u) {
 				input += u.input ?? 0;
@@ -201,6 +212,7 @@ export function extractUsageAndStatus(messages: readonly any[]): {
 		hadError,
 		hadAborted,
 		...(errorMessage ? { errorMessage } : {}),
+		responseModels: [...responseModels],
 	};
 }
 
@@ -252,32 +264,79 @@ function resolveModel(modelId: string, registry: any): any {
 	) ?? null;
 }
 
-/** Resolve a profile's model id to a `Model` object, using tier defaults as
- *  fallback when the profile has no explicit model. */
-export function resolveProfileModel(profile: AgentProfile, _agentsDir: string, registry: any): any | undefined {
-	if (profile.model) {
-		const m = resolveModel(profile.model, registry);
-		if (m) return m;
+/** The model an agent runs on, and where that choice came from. */
+export interface ResolvedAgentModel {
+	model: any;
+	/** `provider/id` of the registry model. */
+	modelId: string;
+	thinking?: string;
+	/** Human-readable origin of the model id (for errors and logs). */
+	source: string;
+}
+
+export interface ModelResolutionOptions {
+	settingsPath?: string;
+	canonicalPath?: string;
+}
+
+/** Resolve the model for an agent profile. Precedence matches pi-subagents:
+ *  settings.json `subagents.agentOverrides.<agent>` → the agent file's
+ *  `model:` → the package's config/models.json. There is no fallback to an
+ *  arbitrary available model: an unconfigured agent, an unreadable
+ *  settings.json, or an id missing from the registry throws. */
+export function resolveAgentModel(profile: AgentProfile, registry: any, opts: ModelResolutionOptions = {}): ResolvedAgentModel {
+	const settingsPath = opts.settingsPath ?? DEFAULT_SETTINGS_PATH;
+	const { settings, error } = readPiSettings(settingsPath);
+	if (error) throw new Error(`${error}. Refusing to pick models without it.`);
+	const override = agentOverride(settings, profile.name);
+	const canonical = loadCanonicalModels(opts.canonicalPath)[profile.name];
+	const [id, source] = override.model
+		? [override.model, `settings.json subagents.agentOverrides.${profile.name}`]
+		: profile.model
+			? [profile.model, `agent "${profile.name}" frontmatter`]
+			: canonical
+				? [canonical, `pi-pipeline config/models.json`]
+				: [undefined, ""];
+	if (!id) {
+		throw new Error(`No model configured for agent "${profile.name}". Set subagents.agentOverrides.${profile.name}.model in ${settingsPath} (or add it to config/models.json and run \`npm run sync-models\`).`);
 	}
-	const tier = profile.name;
-	if (tier === "dev" || tier === "util" || tier === "research" || tier === "high") {
-		const tierMap = loadTierModels();
-		const tierId = tierMap[tier];
-		if (tierId) {
-			const m = resolveModel(tierId, registry);
-			if (m) return m;
-		}
+	const model = resolveModel(id, registry);
+	if (!model) throw new Error(`Model "${id}" for agent "${profile.name}" (from ${source}) is not in pi's model registry.`);
+	return {
+		model,
+		modelId: `${model.provider}/${model.id}`,
+		thinking: override.thinking ?? profile.thinking,
+		source,
+	};
+}
+
+/** Check resolved models against settings.json `enabledModels` (the
+ *  `/scoped-models` list), using pi's own pattern matching. Returns one
+ *  message per out-of-scope agent; empty when in scope or no scope is set. */
+export async function outOfScopeModels(
+	resolved: Array<{ agent: string } & Pick<ResolvedAgentModel, "model" | "modelId" | "source">>,
+	registry: any,
+	settingsPath: string = DEFAULT_SETTINGS_PATH,
+): Promise<string[]> {
+	const patterns = enabledModelPatterns(readPiSettings(settingsPath).settings);
+	if (!patterns) return [];
+	const sdk: any = await import("@earendil-works/pi-coding-agent");
+	const available = typeof registry.getAvailable === "function" ? registry.getAvailable() : [];
+	const inScope = new Set<string>();
+	if (typeof sdk.resolveModelScopeWithDiagnostics === "function") {
+		const { scopedModels } = await sdk.resolveModelScopeWithDiagnostics(patterns, { getAvailable: async () => available });
+		for (const sm of scopedModels) inScope.add(`${sm.model.provider}/${sm.model.id}`);
+	} else {
+		for (const p of patterns) inScope.add(p.replace(/:(off|minimal|low|medium|high|xhigh)$/, ""));
 	}
-	// Last resort: the first available model with configured auth.
-	if (typeof registry.getAvailable === "function") {
-		const avail = registry.getAvailable();
-		if (avail.length > 0) return avail[0];
+	const problems: string[] = [];
+	const seen = new Set<string>();
+	for (const r of resolved) {
+		if (inScope.has(r.modelId) || seen.has(r.agent)) continue;
+		seen.add(r.agent);
+		problems.push(`agent "${r.agent}" → ${r.modelId} (from ${r.source}) is not in enabledModels`);
 	}
-	if (typeof registry.getAll === "function") {
-		const all = registry.getAll();
-		if (all.length > 0) return all[0];
-	}
-	return undefined;
+	return problems;
 }
 
 /* ──────────────────────── session creation ──────────────────────── */
@@ -297,11 +356,11 @@ interface SessionOpts {
 
 /** Create an `AgentSession` for one step. Returns the session and a dispose
  *  function. The session is NOT prompted yet. */
-export async function createStepSession(opts: SessionOpts): Promise<{ session: any; dispose: () => void }> {
+export async function createStepSession(opts: SessionOpts): Promise<{ session: any; dispose: () => void; modelId: string; thinking?: string }> {
 	const sdk = await import("@earendil-works/pi-coding-agent");
 	const { createAgentSession, SessionManager, DefaultResourceLoader } = sdk as any;
-	const model = resolveProfileModel(opts.profile, opts.agentsDir, opts.modelRegistry);
-	if (!model) throw new Error(`No model resolved for agent "${opts.profile.name}"`);
+	const resolved = resolveAgentModel(opts.profile, opts.modelRegistry);
+	const model = resolved.model;
 	// `agentsDir` locates the selected profile file. `configDir` is separate:
 	// current pi derives auth.json/models.json from createAgentSession's
 	// `agentDir`, so passing a package's agents/ directory loses auth.
@@ -340,7 +399,7 @@ export async function createStepSession(opts: SessionOpts): Promise<{ session: a
 		modelRegistry: opts.modelRegistry,
 		resourceLoader: loader,
 		sessionManager,
-		thinkingLevel: opts.profile.thinking as any,
+		thinkingLevel: resolved.thinking as any,
 	});
 
 	if (opts.unitId) {
@@ -369,6 +428,8 @@ export async function createStepSession(opts: SessionOpts): Promise<{ session: a
 
 	return {
 		session,
+		modelId: resolved.modelId,
+		thinking: resolved.thinking,
 		dispose: () => {
 			if (opts.abortSignal) opts.abortSignal.removeEventListener("abort", abortHandler);
 			session.dispose();
@@ -386,7 +447,7 @@ export async function dispatchStep(
 ): Promise<StepResult> {
 	const start = Date.now();
 	const task = composeTask(step, ws);
-	const { session, dispose } = await createStepSession({
+	const { session, dispose, modelId, thinking } = await createStepSession({
 		profile,
 		task,
 		projectDir: opts.projectDir,
@@ -402,7 +463,7 @@ export async function dispatchStep(
 	try {
 		await session.prompt(task);
 		const messages = session.messages ?? [];
-		const { usage, hadError, hadAborted, errorMessage } = extractUsageAndStatus(messages);
+		const { usage, hadError, hadAborted, errorMessage, responseModels } = extractUsageAndStatus(messages);
 		const text = extractText(messages);
 		const sessionStatus: StepResult["status"] = hadError || hadAborted ? "failed" : "completed";
 		if (sessionStatus === "completed") persistMissingSingletonOutputs(step, ws, text);
@@ -415,6 +476,10 @@ export async function dispatchStep(
 			durationMs: Date.now() - start,
 		};
 		if (targets) result.targets = targets;
+		result.model = modelId;
+		if (thinking) result.thinking = thinking;
+		const served = responseModels.filter((m) => m !== modelId);
+		if (served.length > 0) result.responseModels = served;
 		if (hadError) result.error = agentErrorText(errorMessage);
 		if (hadAborted) result.error = "aborted";
 		if (outputError) result.error = outputError;
@@ -454,6 +519,11 @@ export async function dispatchIterate(
 		key: string; status: "completed" | "failed"; text?: string;
 		error?: string; usage?: StepUsage; durationMs?: number;
 	} | undefined> = new Array(total);
+	// Every unit runs on the same profile, so the dispatched model is shared;
+	// served models are collected across units.
+	let stepModel: string | undefined;
+	let stepThinking: string | undefined;
+	const servedModels = new Set<string>();
 
 	const emit = (progress: Omit<PipelineProgress, "phase" | "agent">) => {
 		opts.onProgress?.({ phase: step.phase, agent: step.agent, ...progress });
@@ -473,7 +543,8 @@ export async function dispatchIterate(
 		let dispose = () => {};
 		emit({ kind: "unit-start", unitKey: key, ...counts(), elapsedMs: Date.now() - start });
 		try {
-			({ session, dispose } = await createStepSession({
+			let modelId: string, thinking: string | undefined;
+			({ session, dispose, modelId, thinking } = await createStepSession({
 				profile,
 				task,
 				projectDir: opts.projectDir,
@@ -487,9 +558,12 @@ export async function dispatchIterate(
 					? (text: string) => opts.onProgress!({ kind: "step-text", phase: step.phase, agent: step.agent, unitKey: key, text, ...counts(), elapsedMs: Date.now() - start })
 					: undefined,
 			}));
+			stepModel = modelId;
+			stepThinking = thinking;
 			await session.prompt(task);
 			const messages = session.messages ?? [];
-			const { usage, hadError, hadAborted, errorMessage } = extractUsageAndStatus(messages);
+			const { usage, hadError, hadAborted, errorMessage, responseModels } = extractUsageAndStatus(messages);
+			for (const m of responseModels) servedModels.add(m);
 			const text = extractText(messages);
 			const r: {
 				key: string; status: "completed" | "failed"; text?: string;
@@ -582,6 +656,9 @@ export async function dispatchIterate(
 		usage: { input, output, cacheRead, cacheWrite, cost, turns },
 		durationMs,
 		units: unitsOut,
+		...(stepModel ? { model: stepModel } : {}),
+		...(stepThinking ? { thinking: stepThinking } : {}),
+		...([...servedModels].some((m) => m !== stepModel) ? { responseModels: [...servedModels].filter((m) => m !== stepModel) } : {}),
 	};
 }
 
@@ -894,6 +971,11 @@ export function recordStepResult(
 		},
 	};
 	if (result.error) step.error = result.error;
+	else delete step.error;
+	if (result.model) step.model = result.model;
+	if (result.thinking) step.thinking = result.thinking;
+	if (result.responseModels) step.responseModels = result.responseModels;
+	else delete step.responseModels;
 	if (result.units) {
 		const name = collectionName ?? stepId;
 		step.outputs = [{

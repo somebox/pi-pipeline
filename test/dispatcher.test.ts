@@ -26,10 +26,13 @@ import {
 	composeIterateTask,
 	persistUnitOutput,
 	resolveCollectionOutputAbs,
+	resolveAgentModel,
+	outOfScopeModels,
 	type AgentProfile,
 	type StepResult,
 } from "../src/dispatcher.ts";
-import { createWorkspace, writeManifestShell, updateManifestStep } from "../src/workspace.ts";
+import { createWorkspace, writeManifestShell, updateManifestStep, readManifest } from "../src/workspace.ts";
+import { writeStepLog, buildMetrics } from "../src/report.ts";
 import { buildPlanFromRecipe } from "../src/recipes.ts";
 
 /* ─────────── parseAgentFrontmatter ─────────── */
@@ -457,5 +460,105 @@ test("buildManifestStep: checkpoint flows through; collection output path is col
 	assert.equal(ms.checkpoint, "go");
 	assert.equal(ms.outputs![0]!.kind, "collection");
 	assert.equal(ms.outputs![0]!.path, `collections${path.sep}review`);
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+/* ─────────── model resolution ─────────── */
+
+const MODELS = [
+	{ provider: "openrouter", id: "openai/gpt-6-sol" },
+	{ provider: "openrouter", id: "minimax/minimax-m3" },
+	{ provider: "openrouter", id: "aion-labs/aion-2.0" },
+	{ provider: "openrouter", id: "~anthropic/claude-sonnet-latest" },
+];
+const registry = {
+	find: (provider: string, id: string) => MODELS.find((m) => m.provider === provider && m.id === id),
+	getAll: () => MODELS,
+	getAvailable: () => MODELS,
+};
+function modelFixture(settings: unknown, canonical: unknown = { models: {}, agents: {} }) {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "models-"));
+	const settingsPath = path.join(dir, "settings.json");
+	const canonicalPath = path.join(dir, "models.json");
+	fs.writeFileSync(settingsPath, typeof settings === "string" ? settings : JSON.stringify(settings));
+	fs.writeFileSync(canonicalPath, JSON.stringify(canonical));
+	return { settingsPath, canonicalPath };
+}
+const prof = (name: string, extra: Partial<AgentProfile> = {}): AgentProfile => ({ name, description: "", systemPrompt: "", ...extra });
+
+test("resolveAgentModel: settings agentOverrides beat agent frontmatter and canonical config", () => {
+	const opts = modelFixture(
+		{ subagents: { agentOverrides: { high: { model: "openrouter/openai/gpt-6-sol", thinking: "high" } } } },
+		{ models: { cheap: "openrouter/minimax/minimax-m3" }, agents: { high: "cheap" } },
+	);
+	const r = resolveAgentModel(prof("high", { model: "openrouter/~anthropic/claude-sonnet-latest", thinking: "low" }), registry, opts);
+	assert.equal(r.modelId, "openrouter/openai/gpt-6-sol");
+	assert.equal(r.thinking, "high");
+	assert.match(r.source, /agentOverrides\.high/);
+});
+
+test("resolveAgentModel: frontmatter, then canonical config, when no override", () => {
+	const opts = modelFixture({}, { models: { cheap: "openrouter/minimax/minimax-m3" }, agents: { util: "cheap" } });
+	assert.equal(resolveAgentModel(prof("high", { model: "openrouter/openai/gpt-6-sol" }), registry, opts).modelId, "openrouter/openai/gpt-6-sol");
+	const util = resolveAgentModel(prof("util", { thinking: "low" }), registry, opts);
+	assert.equal(util.modelId, "openrouter/minimax/minimax-m3");
+	assert.equal(util.thinking, "low");
+	assert.match(util.source, /config\/models\.json/);
+});
+
+test("resolveAgentModel: unconfigured agent throws instead of using an arbitrary available model", () => {
+	const opts = modelFixture({});
+	assert.throws(() => resolveAgentModel(prof("coordinator"), registry, opts), /No model configured for agent "coordinator".*agentOverrides\.coordinator/);
+});
+
+test("resolveAgentModel: model missing from registry throws, naming its source", () => {
+	const opts = modelFixture({ subagents: { agentOverrides: { dev: { model: "openrouter/nope/missing" } } } });
+	assert.throws(() => resolveAgentModel(prof("dev"), registry, opts), /"openrouter\/nope\/missing" for agent "dev" \(from settings\.json/);
+});
+
+test("resolveAgentModel: unparsable settings.json throws instead of guessing", () => {
+	const opts = modelFixture("{ not json");
+	assert.throws(() => resolveAgentModel(prof("dev", { model: "openrouter/openai/gpt-6-sol" }), registry, opts), /Could not parse/);
+});
+
+test("outOfScopeModels: flags models outside enabledModels using pi's pattern rules", async () => {
+	const { settingsPath } = modelFixture({ enabledModels: ["openrouter/minimax/minimax-m3", "openrouter/openai/gpt-6-*"] });
+	const at = (agent: string, id: string) => ({ agent, model: registry.find("openrouter", id.replace(/^openrouter\//, "")), modelId: id, source: "test" });
+	const problems = await outOfScopeModels([
+		at("util", "openrouter/minimax/minimax-m3"),
+		at("high", "openrouter/openai/gpt-6-sol"),
+		at("dev", "openrouter/~anthropic/claude-sonnet-latest"),
+	], registry, settingsPath);
+	assert.deepEqual(problems, ['agent "dev" → openrouter/~anthropic/claude-sonnet-latest (from test) is not in enabledModels']);
+});
+
+test("outOfScopeModels: no enabledModels means no scope restriction", async () => {
+	const { settingsPath } = modelFixture({});
+	assert.deepEqual(await outOfScopeModels([{ agent: "dev", model: {}, modelId: "x/y", source: "t" }], registry, settingsPath), []);
+});
+
+test("recordStepResult + logs + metrics: record model, thinking, served model, cost, time", () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pipeline-model-log-"));
+	const ws = createWorkspace(tmp, "x");
+	writeManifestShell(ws, "x", tmp);
+	recordStepResult(ws, "review", {
+		status: "completed", text: "ok", durationMs: 4200,
+		usage: { input: 1000, output: 200, cacheRead: 0, cacheWrite: 0, cost: 0.05, turns: 1 },
+		model: "openrouter/~anthropic/claude-sonnet-latest", thinking: "high",
+		responseModels: ["openrouter/anthropic/claude-sonnet-4.6"],
+	});
+	const man = readManifest(ws.manifestPath);
+	const step = man.steps[0]!;
+	assert.equal(step.model, "openrouter/~anthropic/claude-sonnet-latest");
+	assert.equal(step.thinking, "high");
+	assert.deepEqual(step.responseModels, ["openrouter/anthropic/claude-sonnet-4.6"]);
+	writeStepLog(ws, 1, step, "prompt", "ok");
+	const log = fs.readFileSync(path.join(ws.logsDir, "01-review.md"), "utf8");
+	assert.match(log, /^Model: openrouter\/~anthropic\/claude-sonnet-latest \(thinking: high\)$/m);
+	assert.match(log, /^Served by: openrouter\/anthropic\/claude-sonnet-4\.6$/m);
+	assert.match(log, /^Duration: 4\.2s$/m);
+	const metrics = buildMetrics(man);
+	assert.equal(metrics.steps[0]!.model, "openrouter/~anthropic/claude-sonnet-latest");
+	assert.deepEqual(metrics.by_model["openrouter/~anthropic/claude-sonnet-latest"], { steps: 1, durationMs: 4200, cost: 0.05, tokens: 1200 });
 	fs.rmSync(tmp, { recursive: true, force: true });
 });

@@ -24,7 +24,7 @@ import {
 	injectTierModels, buildCostStep, newReport,
 	toRunMetrics, metricsByModel, metricsTotalCost, metricsTotalDurationMs,
 	classifyFailure, isContextOverflow, failureLabel,
-	STANDARD_PROFILES, DEFAULT_TIER_MODELS,
+	STANDARD_PROFILES, DEFAULT_TIER_MODELS, loadCanonicalModels,
 	IMPL_TEMPLATES, RESEARCH_TEMPLATES,
 } from "../src/lib.ts";
 
@@ -174,7 +174,7 @@ test("renderCostReport: empty report has a friendly message", () => {
 
 /* ───────────────────────── settings readers (D2) ───────────────────────── */
 
-test("loadTierModels: overrides win, defaults otherwise", () => {
+test("loadTierModels: overrides win, canonical config/models.json otherwise", () => {
 	const f = fixtureSettings({ subagents: { agentOverrides: {
 		util: { model: "openrouter/kimi/kimi-k2.7", thinking: "low" },
 		high: { model: "openrouter/anthropic/claude-opus-4", thinking: "high" },
@@ -182,14 +182,20 @@ test("loadTierModels: overrides win, defaults otherwise", () => {
 	const m = loadTierModels(f);
 	assert.equal(m.util, "openrouter/kimi/kimi-k2.7");
 	assert.equal(m.high, "openrouter/anthropic/claude-opus-4");
-	assert.equal(m.research, "openrouter/z-ai/glm-5.3"); // default, not overridden
+	assert.equal(m.research, loadCanonicalModels().research); // not overridden
 });
 
-test("loadTierModels: missing file -> defaults, no throw", () => {
+test("loadTierModels: missing file -> canonical models, never a hardcoded default", () => {
 	const m = loadTierModels(path.join(os.tmpdir(), "does-not-exist-" + Date.now() + ".json"));
-	assert.equal(m.util, "openrouter/minimax/minimax-m3");
-	assert.equal(m.research, "openrouter/z-ai/glm-5.3");
-	assert.equal(m.high, "openrouter/~anthropic/claude-sonnet-latest");
+	const canonical = loadCanonicalModels();
+	for (const p of STANDARD_PROFILES) assert.equal(m[p], canonical[p]);
+	assert.ok(!Object.values(m).some((id) => /sonnet/i.test(id!)));
+});
+
+test("loadCanonicalModels: resolves agents through model aliases", () => {
+	const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "canon-")), "models.json");
+	fs.writeFileSync(f, JSON.stringify({ models: { cheap: "p/a", big: "p/b" }, agents: { util: "cheap", high: "big", bad: "missing" } }));
+	assert.deepEqual(loadCanonicalModels(f), { util: "p/a", high: "p/b" });
 });
 
 test("loadModelFallbackOverrides + fallbacksFor: override by class", () => {
@@ -295,7 +301,7 @@ test("DEFAULT_TIER_MODELS binds every standard profile", () => {
 test("injectTierModels: dev profile gets its model injected", () => {
 	const input: any = { agent: "dev", task: "t" };
 	injectTierModels(input, DEFAULT_TIER_MODELS);
-	assert.equal(input.model, "openrouter/qwen/qwen3.8-27b");
+	assert.equal(input.model, loadCanonicalModels().dev);
 });
 
 test("PlanStep no longer has tier/costClass fields", () => {

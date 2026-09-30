@@ -48,6 +48,8 @@ test("renderRunReadme: status, log rows, totals, resume only when not completed"
 				phase: "Scope",
 				agent: "util",
 				status: "completed",
+				model: "openrouter/minimax/minimax-m3",
+				thinking: "low",
 				durationMs: 12000,
 				usage: { input: 100, output: 50, cost: 0.002 },
 				outputs: [{ name: "scope", kind: "singleton", path: "targets/scope.json" }],
@@ -57,6 +59,8 @@ test("renderRunReadme: status, log rows, totals, resume only when not completed"
 				phase: "Review",
 				agent: "dev",
 				status: "partial",
+				model: "openrouter/~anthropic/claude-sonnet-latest",
+				responseModels: ["openrouter/anthropic/claude-sonnet-4.6"],
 				durationMs: 41000,
 				usage: { input: 200, output: 80, cost: 0.018 },
 				outputs: [{
@@ -76,7 +80,9 @@ test("renderRunReadme: status, log rows, totals, resume only when not completed"
 	const ws = createWorkspace(tmp, "code-quality", new Date("2026-07-19T14:23:55Z"));
 	const md = renderRunReadme(ws, manifest);
 	assert.ok(md.includes("Status: **failed**"));
-	assert.ok(md.includes("| 1 | Scope | util | completed |"));
+	assert.ok(md.includes("| 1 | Scope | util | minimax/minimax-m3:low | completed |"));
+	assert.ok(md.includes("| ~anthropic/claude-sonnet-latest (served: anthropic/claude-sonnet-4.6) |"));
+	assert.match(md, /\*\*By model:\*\* openrouter\/minimax\/minimax-m3 — 1 step\(s\), 12s, /);
 	assert.ok(md.includes("partial (1/2 failed)"));
 	assert.ok(md.includes("**Totals:**"));
 	assert.ok(md.includes("$0.020") || md.includes("$0.02"));

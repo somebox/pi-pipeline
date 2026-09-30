@@ -25,10 +25,24 @@ export interface RunMetricsFile {
 		phase: string;
 		agent: string;
 		status: string;
+		model?: string;
+		thinking?: string;
+		responseModels?: string[];
 		durationMs: number;
 		cost: number;
 		tokens: number;
 	}>;
+	/** Cost, tokens, and time per dispatched model. */
+	by_model: Record<string, { steps: number; durationMs: number; cost: number; tokens: number }>;
+}
+
+/** `provider/id` → the part after the provider, for compact tables. */
+function modelLabel(s: ManifestStep): string {
+	if (!s.model) return "—";
+	const short = s.model.replace(/^[^/]+\//, "");
+	const thinking = s.thinking ? `:${s.thinking}` : "";
+	const served = s.responseModels?.length ? ` (served: ${s.responseModels.map((m) => m.replace(/^[^/]+\//, "")).join(", ")})` : "";
+	return `${short}${thinking}${served}`;
 }
 
 export function fmtDuration(ms: number | undefined): string {
@@ -72,7 +86,7 @@ function logRow(i: number, s: ManifestStep): string {
 			? `running (${completed}/${units.length} done, ${failed} failed)`
 			: `partial (${failed}/${units.length} failed)`;
 	}
-	return `| ${i + 1} | ${s.phase} | ${s.agent} | ${status} | ${dur} | ${cost} |`;
+	return `| ${i + 1} | ${s.phase} | ${s.agent} | ${modelLabel(s)} | ${status} | ${dur} | ${cost} |`;
 }
 
 function totals(steps: ManifestStep[]): { durationMs: number; cost: number; tokens: number; input: number; output: number; cacheRead: number; cacheWrite: number } {
@@ -123,22 +137,32 @@ export function renderRunReadme(
 		lines.push(`Started: ${d}`);
 	}
 	if (manifest.git_head) lines.push(`Git: ${manifest.git_head}`);
+	if (manifest.model_errors?.length) {
+		lines.push("");
+		lines.push("**Not started — model check failed:**");
+		for (const e of manifest.model_errors) lines.push(`- ${e}`);
+	}
 	lines.push("");
 	lines.push("## Plan");
 	const plan = planLinesFrom(manifest, opts?.plan);
 	lines.push(plan.length ? plan.join("\n") : "(no steps)");
 	lines.push("");
 	lines.push("## Log");
-	lines.push("| # | Step | Agent | Status | Duration | Cost |");
-	lines.push("|---|------|-------|--------|----------|------|");
+	lines.push("| # | Step | Agent | Model | Status | Duration | Cost |");
+	lines.push("|---|------|-------|-------|--------|----------|------|");
 	if (manifest.steps.length === 0) {
-		lines.push("| — | — | — | — | — | — |");
+		lines.push("| — | — | — | — | — | — | — |");
 	} else {
 		manifest.steps.forEach((s, i) => lines.push(logRow(i, s)));
 	}
 	const t = totals(manifest.steps);
 	lines.push("");
 	lines.push(`**Totals:** ${fmtDuration(t.durationMs)} · ${fmtCost(t.cost)} · ${fmtTokens(t.tokens)} tok`);
+	const models = Object.entries(byModel(manifest.steps));
+	if (models.length > 0) {
+		lines.push("");
+		lines.push(`**By model:** ${models.map(([m, v]) => `${m} — ${v.steps} step(s), ${fmtDuration(v.durationMs)}, ${fmtCost(v.cost)}, ${fmtTokens(v.tokens)} tok`).join("; ")}`);
+	}
 	lines.push("");
 	lines.push("## Outputs");
 	const outs: string[] = [];
@@ -207,11 +231,32 @@ export function buildMetrics(manifest: Manifest): RunMetricsFile {
 			phase: s.phase,
 			agent: s.agent,
 			status: s.status,
+			...(s.model ? { model: s.model } : {}),
+			...(s.thinking ? { thinking: s.thinking } : {}),
+			...(s.responseModels?.length ? { responseModels: s.responseModels } : {}),
 			durationMs: s.durationMs ?? 0,
 			cost: s.usage?.cost ?? 0,
-			tokens: (s.usage?.input ?? 0) + (s.usage?.output ?? 0) + (s.usage?.cacheRead ?? 0),
+			tokens: stepTokens(s),
 		})),
+		by_model: byModel(manifest.steps),
 	};
+}
+
+function stepTokens(s: ManifestStep): number {
+	return (s.usage?.input ?? 0) + (s.usage?.output ?? 0) + (s.usage?.cacheRead ?? 0);
+}
+
+function byModel(steps: ManifestStep[]): RunMetricsFile["by_model"] {
+	const out: RunMetricsFile["by_model"] = {};
+	for (const s of steps) {
+		if (!s.model) continue;
+		const m = (out[s.model] ??= { steps: 0, durationMs: 0, cost: 0, tokens: 0 });
+		m.steps += 1;
+		m.durationMs += s.durationMs ?? 0;
+		m.cost += s.usage?.cost ?? 0;
+		m.tokens += stepTokens(s);
+	}
+	return out;
 }
 
 export function writeMetrics(ws: WorkspaceInfo, manifest?: Manifest): RunMetricsFile {
@@ -235,9 +280,12 @@ export function writeStepLog(
 	const lines = [
 		`# ${index}. ${step.phase}`,
 		`Agent: ${step.agent}`,
+		`Model: ${step.model ?? "—"}${step.thinking ? ` (thinking: ${step.thinking})` : ""}`,
+		...(step.responseModels?.length ? [`Served by: ${step.responseModels.join(", ")}`] : []),
 		`Status: ${step.status}`,
 		`Duration: ${fmtDuration(step.durationMs)}`,
 		`Cost: ${step.usage ? fmtCost(step.usage.cost) : "—"}`,
+		`Tokens: ${step.usage ? `${fmtTokens(step.usage.input)} in · ${fmtTokens(step.usage.output)} out · ${fmtTokens(step.usage.cacheRead ?? 0)} cache read` : "—"}`,
 		"",
 		"## Prompt",
 		"",
@@ -289,6 +337,10 @@ export function userFacingSummary(ws: WorkspaceInfo, metrics: RunMetricsFile): s
 		`**Path:** \`${ws.dir}\``,
 		`**Totals:** ${fmtDuration(metrics.duration_ms)} · ${fmtCost(metrics.cost)} · ${fmtTokens(metrics.tokens.total)} tok`,
 	];
+	const models = Object.entries(metrics.by_model ?? {});
+	if (models.length > 0) {
+		lines.push(`**Models:** ${models.map(([m, v]) => `${m} ${fmtCost(v.cost)}`).join(" · ")}`);
+	}
 	if (metrics.status !== "completed") {
 		lines.push(`**Resume:** \`/pipeline-resume ${ws.runId}\``);
 	}

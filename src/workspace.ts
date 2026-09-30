@@ -61,6 +61,11 @@ export interface ManifestStep {
 	/** Checkpoint token declared by the recipe step; the run pauses after this
 	 *  step completes and records its decision under manifest.checkpoints. */
 	checkpoint?: string;
+	/** Registry model the step was dispatched on (`provider/id`). */
+	model?: string;
+	thinking?: string;
+	/** Models the provider reported serving when they differ from `model`. */
+	responseModels?: string[];
 	usage?: {
 		input: number;
 		output: number;
@@ -80,6 +85,8 @@ export interface Manifest {
 	task?: string;
 	inputs?: Record<string, string>;
 	git_head?: string;
+	/** Why the model preflight refused to start the run. */
+	model_errors?: string[];
 	started_at: string;
 	project_dir: string;
 	workspace_dir: string;

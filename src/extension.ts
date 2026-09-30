@@ -63,6 +63,9 @@ import { buildPlanFromRecipe, checkRecipeInputs, declaredInputs, formatInputProb
 import { discoverRecipes, findProjectPipelineDirs, resolvePackagePipelineDirs, resolvePackageAgentDirs } from "./discovery.ts";
 import {
 	loadAgentProfileFromDirs,
+	resolveAgentModel,
+	outOfScopeModels,
+	type ResolvedAgentModel,
 	dispatchStep,
 	dispatchIterate,
 	buildManifestStep,
@@ -239,7 +242,7 @@ function shortModelLabel(id: string): string {
  *  without a code change. */
 function profilesLine(): string {
 	const tiers = loadTierModels();
-	return STANDARD_PROFILES.map((p: Profile) => `${p} (${shortModelLabel(tiers[p])})`).join(", ");
+	return STANDARD_PROFILES.map((p: Profile) => `${p} (${tiers[p] ? shortModelLabel(tiers[p]) : "unset"})`).join(", ");
 }
 
 function lastRunReport(): PipelineCostReport {
@@ -274,7 +277,7 @@ function buildCostReport(
 		task: step.phase,
 		results: [{
 			agent: step.agent,
-			model: "(dispatcher)",
+			model: result.model ?? "(unknown)",
 			task: step.phase,
 			exitCode: result.status === "completed" ? 0 : 1,
 			error: result.error,
@@ -658,6 +661,48 @@ pi.on("before_provider_request", (event) => {
 			}
 
 			const agentDirs = discoverAgentDirs(projectDir);
+
+			// Model preflight: resolve every step's model before dispatching
+			// anything. An unconfigured agent, a model missing from the registry,
+			// or a model outside settings.json `enabledModels` refuses the run
+			// rather than falling back to some other model mid-run.
+			{
+				const problems: string[] = [];
+				const resolvedModels: Array<{ agent: string } & ResolvedAgentModel> = [];
+				const seenAgents = new Set<string>();
+				plan.steps.forEach((step, i) => {
+					if (resumeDelta?.[i]?.action === "skip" || seenAgents.has(step.agent)) return;
+					seenAgents.add(step.agent);
+					const loaded = loadAgentProfileFromDirs(step.agent, agentDirs);
+					if (!loaded) return; // reported per step by the dispatch loop
+					try {
+						resolvedModels.push({ agent: step.agent, ...resolveAgentModel(loaded.profile, modelRegistry) });
+					} catch (err) {
+						problems.push(err instanceof Error ? err.message : String(err));
+					}
+				});
+				try {
+					problems.push(...await outOfScopeModels(resolvedModels, modelRegistry));
+				} catch (err) {
+					problems.push(`Could not check enabledModels: ${err instanceof Error ? err.message : String(err)}`);
+				}
+				if (problems.length > 0) {
+					const msg = problems.map((p) => `- ${p}`).join("\n");
+					try {
+						patchManifest(currentWorkspace, { model_errors: problems });
+						finalizeManifest(currentWorkspace, "failed");
+						writeMetrics(currentWorkspace, readManifest(currentWorkspace.manifestPath));
+						writeRunReadme(currentWorkspace, plan);
+						writeRootIndex(projectDir, listRuns(projectDir));
+					} catch { /* best effort */ }
+					if (ctx.ui?.setStatus) ctx.ui.setStatus("pipeline", "Pipeline not started · model check failed");
+					text += `\n\n**PIPELINE NOT STARTED: model check failed.**\n${msg}\n\nFix the model settings in ~/.pi/agent/settings.json (\`subagents.agentOverrides\` and \`enabledModels\`), run /reload, and start the pipeline again. Do not run the steps manually or pick a different model yourself.\n`;
+					return { content: [{ type: "text" as const, text }], details: pipelineDetails(plan, resolved.name, false) };
+				}
+				text += "\n\n**Models:** " + resolvedModels
+					.map((r) => `${r.agent} → \`${r.modelId}\`${r.thinking ? ` (${r.thinking})` : ""}`)
+					.join(", ");
+			}
 
 			let aborted = false;
 			const abortListener = () => {
