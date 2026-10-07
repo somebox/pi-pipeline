@@ -359,6 +359,7 @@ pi.on("before_provider_request", (event) => {
 	pi.registerTool({
 		name: "pipeline",
 		label: "Pipeline",
+		executionMode: "sequential",
 		description:
 			"Run an effort-scaled multi-agent pipeline. Two ways to pick one: (1) pass `pipeline` with a recipe name to run a specific opinionated process (e.g. 'code-quality', 'verify-source'); (2) omit it to use the generic inferred pipeline (mode: research/implementation, effort: surface/standard/deep). Recipes are user/project/package-defined markdown files; call with { action: 'list' } is NOT supported — use the /pipelines command to browse them. Named recipes execute inside this tool via the owned dispatcher. A checkpoint pauses execution and must be surfaced to the user; do not approve, resume, or manually execute the displayed plan without an explicit user decision. If execution fails, report the error and stop — never hand-execute the returned plan. Use dryRun: true only when you want a plan without dispatching any subagents.",
 		parameters: Type.Object({
