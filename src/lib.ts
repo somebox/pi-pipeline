@@ -6,7 +6,8 @@
  * the plan builders, cost rollup, model resolution, and formatters unit-
  * testable with plain `node --test` (no jiti, no stubs).
  *
- * Settings readers (loadTierModels / loadModelFallbackOverrides / fallbacksFor)
+ * Settings readers (loadTierModels / loadModelFallbackOverrides /
+ * loadModelClassOverrides / fallbacksFor)
  * take an optional `filePath` so tests can feed a fixture instead of reading
  * the real ~/.pi/agent/settings.json.
  */
@@ -408,9 +409,12 @@ export const RESEARCH_TEMPLATES: Record<Effort, Plan> = {
  *   research($$)→ coding  : z-ai/glm-5.3            → ~deepseek/deepseek-v4-flash-latest → openai/gpt-5.6-luna-pro
  *   high  ($$$) → stronger: ~anthropic/claude-sonnet-latest → openai/gpt-5.6-terra-pro → ~anthropic/claude-opus-latest
  *
- * Tunable without editing the package: set `pipeline.modelFallbacks` in
- * ~/.pi/agent/settings.json as `{ "<class>": ["id", ...] }` to override
- * the defaults below. Missing classes fall back to the defaults.
+ * Tunable without editing the package, in ~/.pi/agent/settings.json:
+ *   - `pipeline.modelFallbacks`: `{ "<class>": ["id", ...] }` replaces a
+ *     class's list. Classes it leaves out keep the defaults below.
+ *   - `pipeline.modelClasses`: `{ "<model id>": "<class>" }` names the class
+ *     of a model. It wins over the built-in PRIMARY_TO_CLASS, and may name a
+ *     class that only `pipeline.modelFallbacks` defines.
  *
  * Note: OpenRouter model ids are bare `vendor/model` (no `openrouter/`
  * prefix). The `~` prefix is OpenRouter's "latest" alias. Some ids
@@ -421,7 +425,7 @@ export const RESEARCH_TEMPLATES: Record<Effort, Plan> = {
 
 // OpenRouter caps the `models` array at 3 entries per request — anything more
 // returns 400 "'models' array must have 3 items or fewer." Keep each class
-// at ≤3. The injector in extension.ts also slices to 3 as defense-in-depth.
+// at ≤3. withModelFallbacks also slices to 3 as defense-in-depth.
 export const DEFAULT_MODEL_FALLBACKS: Record<ModelClass, string[]> = {
 	utility: ["minimax/minimax-m3", "qwen/qwen3.8-27b", "~deepseek/deepseek-v4-flash-latest"],
 	coding: ["z-ai/glm-5.3", "openai/gpt-5.6-luna-pro", "~deepseek/deepseek-v4-flash-latest"],
@@ -430,59 +434,123 @@ export const DEFAULT_MODEL_FALLBACKS: Record<ModelClass, string[]> = {
 
 export type ModelClass = "utility" | "coding" | "stronger";
 
-/** Map each known primary model id → its fallback class. */
+/** Built-in model id → fallback class, used for models that
+ *  `pipeline.modelClasses` in settings.json does not name. */
 export const PRIMARY_TO_CLASS: Record<string, ModelClass> = {
 	// utility / cheap
 	"minimax/minimax-m3": "utility",
 	"qwen/qwen3.8-27b": "utility",
 	"~deepseek/deepseek-v4-flash-latest": "utility",
+	"~z-ai/glm-flash-latest": "utility",
 	"moonshotai/kimi-k2.7-code": "utility", // legacy default dev
 	// coding / mid
+	"~z-ai/glm-latest": "coding",
 	"z-ai/glm-5.3": "coding",
 	"z-ai/glm-5.2": "coding", // legacy
+	"~openai/gpt-luna-latest": "coding",
 	"openai/gpt-5.6-luna-pro": "coding",
 	"~google/gemini-flash-latest": "coding",
 	// stronger / high
 	"~anthropic/claude-sonnet-latest": "stronger",
 	"anthropic/claude-sonnet-5": "stronger", // legacy
+	"~openai/gpt-terra-latest": "stronger",
 	"openai/gpt-5.6-terra-pro": "stronger",
 	"~anthropic/claude-opus-latest": "stronger",
+	"~openai/gpt-sol-latest": "stronger",
 	"openai/gpt-5.6-sol": "stronger",
 };
 
-/** Read ~/.pi/agent/settings.json -> pipeline.modelFallbacks, best-effort.
- * Memoized at module scope; refreshes on `/reload` (module re-evaluation). */
-const _fallbackOverridesCache = new Map<string, Record<string, string[]>>();
-export function loadModelFallbackOverrides(filePath: string = DEFAULT_SETTINGS_PATH): Record<string, string[]> {
-	const cached = _fallbackOverridesCache.get(filePath);
+/** The `pipeline.modelFallbacks` and `pipeline.modelClasses` blocks of
+ *  ~/.pi/agent/settings.json, best-effort: entries of the wrong type are
+ *  skipped, and a missing or unparsable file means no overrides. Memoized
+ *  per path at module scope; refreshes on `/reload` (module re-evaluation). */
+interface FallbackSettings {
+	fallbacks: Record<string, string[]>;
+	classes: Record<string, string>;
+}
+const _fallbackSettingsCache = new Map<string, FallbackSettings>();
+function loadFallbackSettings(filePath: string): FallbackSettings {
+	const cached = _fallbackSettingsCache.get(filePath);
 	if (cached !== undefined) return cached;
-	const out: Record<string, string[]> = {};
+	const out: FallbackSettings = { fallbacks: {}, classes: {} };
 	try {
-		const raw = fs.readFileSync(filePath, "utf8");
-		const parsed = JSON.parse(raw);
-		const f = parsed?.pipeline?.modelFallbacks;
+		const pipeline = JSON.parse(fs.readFileSync(filePath, "utf8"))?.pipeline;
+		const f = pipeline?.modelFallbacks;
 		if (f && typeof f === "object") {
 			for (const [k, v] of Object.entries(f)) {
-				if (Array.isArray(v) && v.every((x) => typeof x === "string")) out[k] = v;
+				if (Array.isArray(v) && v.every((x) => typeof x === "string")) out.fallbacks[k] = v;
+			}
+		}
+		const c = pipeline?.modelClasses;
+		if (c && typeof c === "object" && !Array.isArray(c)) {
+			for (const [k, v] of Object.entries(c)) {
+				if (typeof v === "string" && v.trim()) out.classes[k] = v.trim();
 			}
 		}
 	} catch {
 		/* missing/unreadable/unparsable settings → use defaults */
 	}
-	_fallbackOverridesCache.set(filePath, out);
+	_fallbackSettingsCache.set(filePath, out);
 	return out;
 }
 
-/** Resolve the fallback list for a primary model id, or undefined if unknown. */
-export function fallbacksFor(modelId: string | undefined, filePath: string = DEFAULT_SETTINGS_PATH): string[] | undefined {
+/** `pipeline.modelFallbacks` from settings.json: class → model ids. */
+export function loadModelFallbackOverrides(filePath: string = DEFAULT_SETTINGS_PATH): Record<string, string[]> {
+	return loadFallbackSettings(filePath).fallbacks;
+}
+
+/** `pipeline.modelClasses` from settings.json: model id → class. */
+export function loadModelClassOverrides(filePath: string = DEFAULT_SETTINGS_PATH): Record<string, string> {
+	return loadFallbackSettings(filePath).classes;
+}
+
+/** Look a model id up in a map keyed by model id, with or without the
+ *  `openrouter/` provider prefix on either side. `payload.model` is usually
+ *  bare (`~z-ai/glm-latest`), while settings.json writes `openrouter/…`; an
+ *  OpenRouter-owned id such as `openrouter/free` is bare as it stands. */
+function lookupModelId<T>(map: Record<string, T>, id: string): T | undefined {
+	if (Object.hasOwn(map, id)) return map[id];
+	if (Object.hasOwn(map, `openrouter/${id}`)) return map[`openrouter/${id}`];
+	const bare = id.replace(/^openrouter\//, "");
+	return bare !== id && Object.hasOwn(map, bare) ? map[bare] : undefined;
+}
+
+/** The fallback class of a model: `pipeline.modelClasses` in settings.json
+ *  first, then the built-in PRIMARY_TO_CLASS. Undefined if neither names it. */
+export function modelClassFor(modelId: string | undefined, filePath: string = DEFAULT_SETTINGS_PATH): string | undefined {
 	if (!modelId) return undefined;
-	// Normalize: strip a leading "openrouter/" provider prefix if present
-	// (payload.model is usually bare, but be lenient).
-	const id = modelId.replace(/^openrouter\//, "");
-	const cls = PRIMARY_TO_CLASS[id];
+	return lookupModelId(loadModelClassOverrides(filePath), modelId) ?? lookupModelId(PRIMARY_TO_CLASS, modelId);
+}
+
+/** Resolve the fallback list for a model id: its class's list from
+ *  `pipeline.modelFallbacks`, else the class's default. Undefined if the
+ *  model has no class, or its class has no list. */
+export function fallbacksFor(modelId: string | undefined, filePath: string = DEFAULT_SETTINGS_PATH): string[] | undefined {
+	const cls = modelClassFor(modelId, filePath);
 	if (!cls) return undefined;
 	const overrides = loadModelFallbackOverrides(filePath);
-	return overrides[cls] ?? DEFAULT_MODEL_FALLBACKS[cls];
+	if (Object.hasOwn(overrides, cls)) return overrides[cls];
+	return Object.hasOwn(DEFAULT_MODEL_FALLBACKS, cls) ? DEFAULT_MODEL_FALLBACKS[cls as ModelClass] : undefined;
+}
+
+// OpenRouter caps the `models` array at 3 entries per request; more returns
+// 400 "'models' array must have 3 items or fewer." A user's
+// `pipeline.modelFallbacks` list may be longer, so the injector slices.
+export const OPENROUTER_MAX_MODELS = 3;
+
+/** The provider payload with OpenRouter's `models` fallback array added for
+ *  its `model`, or undefined to leave the payload as it is: no string
+ *  `model`, a `models` array already set, or no fallbacks for the model.
+ *  The `before_provider_request` hook in extension.ts returns this. */
+export function withModelFallbacks(payload: unknown, filePath: string = DEFAULT_SETTINGS_PATH): Record<string, unknown> | undefined {
+	if (!payload || typeof payload !== "object") return undefined;
+	const p = payload as Record<string, unknown>;
+	const model = p["model"];
+	if (typeof model !== "string") return undefined;
+	if (Array.isArray(p["models"]) && p["models"].length > 0) return undefined;
+	const chain = fallbacksFor(model, filePath);
+	if (!chain || chain.length === 0) return undefined;
+	return { ...p, models: chain.slice(0, OPENROUTER_MAX_MODELS) };
 }
 
 /* ──────────────────────── tier model pinning ────────────────────────
@@ -507,9 +575,9 @@ export function fallbacksFor(modelId: string | undefined, filePath: string = DEF
  * restart is still recommended so pi-subagents' own mapping is consistent.
  */
 
-/** The package's canonical agent→model map (`config/models.json`, the same
- *  file `npm run sync-models` writes into settings.json). Used only when
- *  settings.json has no override for an agent — never a hardcoded model. */
+/** The package's default agent→model map (`config/models.json`). Used only
+ *  when settings.json has no override for an agent — never a hardcoded model.
+ *  The package never writes settings.json. */
 export const CANONICAL_MODELS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "config", "models.json");
 
 /** Read `config/models.json` as agent → model id. Missing/invalid → {}. */

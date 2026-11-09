@@ -51,7 +51,7 @@ import {
 	buildPlan,
 	summarizeCost,
 	renderPlan,
-	fallbacksFor,
+	withModelFallbacks,
 	renderCostReport,
 	renderAuditReport,
 	renderStepAudit,
@@ -336,20 +336,9 @@ pi.on("session_start", (_event, ctx) => {
 });
 
 // 1b. Model fallback: inject OpenRouter's native `models` array so the
-// server falls through on rate-limits/downtime (see DEFAULT_MODEL_FALLBACKS).
-// OpenRouter caps `models` at 3; slice defensively in case a user override
-// or future default exceeds the limit.
-const OR_MAX_MODELS = 3;
-pi.on("before_provider_request", (event) => {
-	const payload = event.payload as Record<string, unknown> | undefined;
-	if (!payload || typeof payload !== "object") return;
-	const model = payload["model"];
-	if (typeof model !== "string") return;
-	const chain = fallbacksFor(model);
-	if (!chain || chain.length === 0) return;
-	if (Array.isArray(payload["models"]) && payload["models"].length > 0) return;
-	return { ...payload, models: chain.slice(0, OR_MAX_MODELS) };
-});
+// server falls through on rate-limits/downtime (see DEFAULT_MODEL_FALLBACKS
+// and withModelFallbacks in lib.ts).
+pi.on("before_provider_request", (event) => withModelFallbacks(event.payload));
 
 // The dead `subagent`/`Agent` event hooks are removed. The pipeline tool
 // now owns dispatch (see Stage D); usage comes from the dispatcher, not

@@ -298,7 +298,7 @@ export function resolveAgentModel(profile: AgentProfile, registry: any, opts: Mo
 				? [canonical, `pi-pipeline config/models.json`]
 				: [undefined, ""];
 	if (!id) {
-		throw new Error(`No model configured for agent "${profile.name}". Set subagents.agentOverrides.${profile.name}.model in ${settingsPath} (or add it to config/models.json and run \`npm run sync-models\`).`);
+		throw new Error(`No model configured for agent "${profile.name}". Set subagents.agentOverrides.${profile.name}.model in ${settingsPath}, or a \`model:\` in the agent's frontmatter.`);
 	}
 	const model = resolveModel(id, registry);
 	if (!model) throw new Error(`Model "${id}" for agent "${profile.name}" (from ${source}) is not in pi's model registry.`);

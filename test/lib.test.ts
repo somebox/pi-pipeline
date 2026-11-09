@@ -19,8 +19,8 @@ import path from "node:path";
 import {
 	inferEffort, inferMode, normalizeModel, fmtTokens, fmtCost,
 	summarizeCost, buildPlan, mapResultEntry, rollupByModel, renderCostReport, renderAuditReport,
-	loadTierModels, loadModelFallbackOverrides, fallbacksFor, isTierAgent,
-	DEFAULT_MODEL_FALLBACKS,
+	loadTierModels, loadModelFallbackOverrides, loadModelClassOverrides, fallbacksFor, isTierAgent,
+	modelClassFor, withModelFallbacks, DEFAULT_MODEL_FALLBACKS, OPENROUTER_MAX_MODELS,
 	injectTierModels, buildCostStep, newReport,
 	toRunMetrics, metricsByModel, metricsTotalCost, metricsTotalDurationMs,
 	classifyFailure, isContextOverflow, failureLabel,
@@ -230,6 +230,100 @@ test("DEFAULT_MODEL_FALLBACKS: each class ≤3 (OpenRouter 'models' cap)", () =>
 	for (const [cls, chain] of Object.entries(DEFAULT_MODEL_FALLBACKS)) {
 		assert.ok(chain.length <= 3, `class '${cls}' has ${chain.length} entries: ${JSON.stringify(chain)}`);
 	}
+});
+
+/** The `pipeline.modelFallbacks` block agent-tools' scripts/install writes
+ *  (from config/models.yaml pi.pipeline_fallbacks). */
+const AGENT_TOOLS_FALLBACKS = {
+	utility: ["minimax/minimax-m3", "~z-ai/glm-flash-latest", "~deepseek/deepseek-v4-flash-latest"],
+	coding: ["~z-ai/glm-latest", "~openai/gpt-luna-latest", "~deepseek/deepseek-v4-flash-latest"],
+	stronger: ["~anthropic/claude-sonnet-latest", "~openai/gpt-terra-latest", "~anthropic/claude-opus-latest"],
+};
+
+test("fallbacksFor: OpenRouter -latest aliases have built-in classes", () => {
+	const f = fixtureSettings({ pipeline: { modelFallbacks: AGENT_TOOLS_FALLBACKS } });
+	// The models agent-tools assigns to agents, as payload.model carries them
+	// (bare) and as settings.json writes them (openrouter/ prefix).
+	for (const [model, cls] of [
+		["~z-ai/glm-latest", "coding"],
+		["openrouter/~z-ai/glm-latest", "coding"],
+		["~anthropic/claude-sonnet-latest", "stronger"],
+		["openrouter/~anthropic/claude-sonnet-latest", "stronger"],
+		["minimax/minimax-m3", "utility"],
+		["openrouter/minimax/minimax-m3", "utility"],
+		// config/models.json defaults
+		["~z-ai/glm-flash-latest", "utility"],
+		["~openai/gpt-luna-latest", "coding"],
+		["~google/gemini-flash-latest", "coding"],
+		["~openai/gpt-sol-latest", "stronger"],
+	] as const) {
+		assert.equal(modelClassFor(model, f), cls, model);
+		assert.deepEqual(fallbacksFor(model, f), AGENT_TOOLS_FALLBACKS[cls], model);
+	}
+});
+
+test("modelClassFor: pipeline.modelClasses names a model's class and wins over the built-in", () => {
+	const f = fixtureSettings({ pipeline: {
+		modelFallbacks: { ...AGENT_TOOLS_FALLBACKS, vision: ["~google/gemini-pro-latest", "~openai/gpt-terra-latest"] },
+		modelClasses: {
+			"openrouter/~x-ai/grok-latest": "stronger",   // prefixed key, bare payload id
+			"~moonshotai/kimi-latest": "coding",          // bare key
+			"~z-ai/glm-latest": "stronger",               // overrides the built-in "coding"
+			"openrouter/free": "utility",                 // OpenRouter-owned id, bare as it stands
+			"~google/gemini-pro-latest": "vision",        // class only modelFallbacks defines
+			"some/model-without-list": "nonexistent",
+			"bad/type": 42,
+			"bad/blank": "  ",
+		},
+	} });
+	assert.deepEqual(loadModelClassOverrides(f), {
+		"openrouter/~x-ai/grok-latest": "stronger",
+		"~moonshotai/kimi-latest": "coding",
+		"~z-ai/glm-latest": "stronger",
+		"openrouter/free": "utility",
+		"~google/gemini-pro-latest": "vision",
+		"some/model-without-list": "nonexistent",
+	});
+	assert.equal(modelClassFor("~x-ai/grok-latest", f), "stronger");
+	assert.equal(modelClassFor("openrouter/~moonshotai/kimi-latest", f), "coding");
+	assert.equal(modelClassFor("~z-ai/glm-latest", f), "stronger");
+	assert.equal(modelClassFor("openrouter/free", f), "utility");
+	assert.deepEqual(fallbacksFor("~x-ai/grok-latest", f), AGENT_TOOLS_FALLBACKS.stronger);
+	assert.deepEqual(fallbacksFor("~google/gemini-pro-latest", f), ["~google/gemini-pro-latest", "~openai/gpt-terra-latest"]);
+	// A class with no list in settings or defaults gives no fallbacks.
+	assert.equal(fallbacksFor("some/model-without-list", f), undefined);
+	// Entries of the wrong type are ignored; the built-in map still applies.
+	assert.equal(modelClassFor("bad/type", f), undefined);
+	assert.equal(modelClassFor("minimax/minimax-m3", f), "utility");
+});
+
+test("modelClassFor: a class from modelClasses uses the default list when modelFallbacks leaves it out", () => {
+	const f = fixtureSettings({ pipeline: { modelClasses: { "~x-ai/grok-latest": "coding" } } });
+	assert.deepEqual(fallbacksFor("~x-ai/grok-latest", f), DEFAULT_MODEL_FALLBACKS.coding);
+});
+
+test("withModelFallbacks: injects the class's models array into an OpenRouter request", () => {
+	const f = fixtureSettings({ pipeline: { modelFallbacks: AGENT_TOOLS_FALLBACKS } });
+	const payload = { model: "~z-ai/glm-latest", messages: [{ role: "user", content: "hi" }], stream: true };
+	const out = withModelFallbacks(payload, f);
+	assert.deepEqual(out, { ...payload, models: AGENT_TOOLS_FALLBACKS.coding });
+	assert.equal(payload.hasOwnProperty("models"), false, "input payload is not mutated");
+	assert.deepEqual(withModelFallbacks({ model: "~anthropic/claude-sonnet-latest" }, f)?.models, AGENT_TOOLS_FALLBACKS.stronger);
+	assert.deepEqual(withModelFallbacks({ model: "minimax/minimax-m3" }, f)?.models, AGENT_TOOLS_FALLBACKS.utility);
+});
+
+test("withModelFallbacks: leaves the payload alone when it cannot or should not add fallbacks", () => {
+	const f = fixtureSettings({ pipeline: { modelFallbacks: AGENT_TOOLS_FALLBACKS } });
+	assert.equal(withModelFallbacks(undefined, f), undefined);
+	assert.equal(withModelFallbacks({ messages: [] }, f), undefined);
+	assert.equal(withModelFallbacks({ model: "some/unknown-model" }, f), undefined);
+	assert.equal(withModelFallbacks({ model: "~z-ai/glm-latest", models: ["a/b"] }, f), undefined, "a caller's own models array wins");
+});
+
+test("withModelFallbacks: slices a long settings list to OpenRouter's cap", () => {
+	const f = fixtureSettings({ pipeline: { modelFallbacks: { coding: ["a/1", "a/2", "a/3", "a/4", "a/5"] } } });
+	assert.deepEqual(withModelFallbacks({ model: "~z-ai/glm-latest" }, f)?.models, ["a/1", "a/2", "a/3"]);
+	assert.equal(OPENROUTER_MAX_MODELS, 3);
 });
 
 /* ───────────────────────── injectTierModels (the glm-5.2 fix) ───────────────────────── */

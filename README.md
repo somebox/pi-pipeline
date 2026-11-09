@@ -50,26 +50,59 @@ Run `/reload` inside pi to hot-reload changes. You can run the test suite using 
 
 ## Configuration
 
-Add the recommended agent overrides and fallback models to your `~/.pi/agent/settings.json`:
+pi-pipeline reads its model settings from `~/.pi/agent/settings.json` and
+never writes that file. For example:
 
 ```json
 {
   "subagents": {
     "agentOverrides": {
-      "high":     { "model": "openrouter/anthropic/claude-sonnet-5", "thinking": "high",
-                   "fallbackModels": ["~openai/gpt-mini-latest"] },
-      "research": { "model": "openrouter/z-ai/glm-5.2",            "thinking": "medium",
-                   "fallbackModels": ["google/gemini-3.5-flash", "qwen/qwen3.7-max"] },
-      "util":     { "model": "openrouter/minimax/minimax-m3",     "thinking": "low",
-                   "fallbackModels": ["moonshotai/kimi-k2.7-code"] },
-      "dev":      { "model": "openrouter/moonshotai/kimi-k2.7-code", "thinking": "low",
-                   "fallbackModels": ["minimax/minimax-m3"] }
+      "util":     { "model": "openrouter/minimax/minimax-m3" },
+      "dev":      { "model": "openrouter/~openai/gpt-luna-latest", "thinking": "low" },
+      "research": { "model": "openrouter/~z-ai/glm-latest", "thinking": "high" },
+      "high":     { "model": "openrouter/~anthropic/claude-sonnet-latest", "thinking": "high" }
+    }
+  },
+  "pipeline": {
+    "modelFallbacks": {
+      "utility":  ["minimax/minimax-m3", "~z-ai/glm-flash-latest", "~deepseek/deepseek-v4-flash-latest"],
+      "coding":   ["~z-ai/glm-latest", "~openai/gpt-luna-latest", "~deepseek/deepseek-v4-flash-latest"],
+      "stronger": ["~anthropic/claude-sonnet-latest", "~openai/gpt-terra-latest", "~anthropic/claude-opus-latest"]
+    },
+    "modelClasses": {
+      "openrouter/~x-ai/grok-latest": "stronger"
     }
   }
 }
 ```
 
-*Note: `fallbackModels` under `agentOverrides` are fully supported by `pi-subagents`. They perform client-side retries on transient errors (such as 429 rate limits), complementing our server-side OpenRouter fallback arrays.*
+`subagents.agentOverrides.<agent>` sets one model and thinking level per agent,
+for pi-subagents and for pipeline steps alike (see
+[Model configuration](#model-configuration)). pi-subagents removed
+`fallbackModels` in 0.68.0 and now rejects an override that sets it, so
+fallbacks are configured under `pipeline` instead.
+
+### Model fallbacks
+
+Before every provider request (the main session's and every subagent's), the
+extension adds OpenRouter's `models` array for the request's model. OpenRouter
+tries `model` first, then the `models` entries in order, on rate limits,
+downtime, moderation or context-length errors
+([OpenRouter docs](https://openrouter.ai/docs/guides/routing/model-fallbacks)).
+The class of the request's model chooses the list:
+
+- `pipeline.modelFallbacks` maps a class to its list of OpenRouter model ids,
+  without the `openrouter/` prefix. OpenRouter accepts at most 3, so longer lists
+  are cut to the first 3. A class you leave out keeps the package default
+  (`DEFAULT_MODEL_FALLBACKS` in [`src/lib.ts`](src/lib.ts)).
+- `pipeline.modelClasses` maps a model id, with or without the `openrouter/`
+  prefix, to its class. It wins over the package's built-in map
+  (`PRIMARY_TO_CLASS` in [`src/lib.ts`](src/lib.ts)), which covers the default
+  models and the current `~…-latest` aliases. It may name a class that only
+  `pipeline.modelFallbacks` defines.
+
+A model with no class gets no `models` array. Both keys are read once per load,
+so run `/reload` in pi after changing them.
 
 ---
 
@@ -101,29 +134,23 @@ Verify the limits are picked up by running `pi --list-models`.
 
 ## Model configuration
 
-The canonical profile-to-model mapping is in [`config/models.json`](config/models.json).
-It covers both pi-pipeline profiles and the generic `pi-subagents` agents
-(`reviewer`, `oracle`, `scout`, and others). Generate explicit entries in
-`~/.pi/agent/settings.json` with:
-
-```bash
-npm run sync-models
-```
-
-The script preserves unrelated settings and existing fallback models. If
-`enabledModels` (the `/scoped-models` list) is set, it also adds any mapped model
-that list does not cover, since the pipeline refuses to run out-of-scope models;
-it never removes entries. Use `npm run check-models` to check for drift without
-writing the settings file. Write model ids with their provider prefix (for
-example `openrouter/~openai/gpt-sol-latest`) so they match `settings.json` and
-`enabledModels` exactly.
-If you change a model mapping, run `/reload` in pi before starting new agents.
+Model overrides come from `subagents.agentOverrides` in
+`~/.pi/agent/settings.json`, which you maintain by hand or with whatever manages
+your pi config. pi-pipeline only reads it. (The author's setup writes
+`enabledModels`, `subagents.agentOverrides`, `modelThinkingLevels` and
+`pipeline.modelFallbacks` from one models file in a separate config repo.)
+Write model ids with their provider prefix (for example
+`openrouter/~openai/gpt-sol-latest`) so they match `enabledModels` exactly.
+If you change a model, run `/reload` in pi before starting new agents.
 
 Each pipeline step's model is chosen in this order, the same as pi-subagents:
 
 1. `subagents.agentOverrides.<agent>.model` (and `.thinking`) in `~/.pi/agent/settings.json`
 2. `model:` in the agent file's frontmatter
-3. `config/models.json` in this package
+3. [`config/models.json`](config/models.json) in this package: defaults for
+   pipeline steps whose agent has no override and no `model:`. pi-subagents
+   does not read this file, so its own agents (`reviewer`, `scout`, …) need
+   overrides in `settings.json` to use these models.
 
 There is no other fallback. Before a run dispatches anything, it resolves the
 model for every agent the plan uses and refuses to start if an agent has no
