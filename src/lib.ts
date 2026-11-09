@@ -522,15 +522,25 @@ export function modelClassFor(modelId: string | undefined, filePath: string = DE
 	return lookupModelId(loadModelClassOverrides(filePath), modelId) ?? lookupModelId(PRIMARY_TO_CLASS, modelId);
 }
 
-/** Resolve the fallback list for a model id: its class's list from
- *  `pipeline.modelFallbacks`, else the class's default. Undefined if the
- *  model has no class, or its class has no list. */
-export function fallbacksFor(modelId: string | undefined, filePath: string = DEFAULT_SETTINGS_PATH): string[] | undefined {
-	const cls = modelClassFor(modelId, filePath);
-	if (!cls) return undefined;
+/** The fallback list for a class: `pipeline.modelFallbacks`, else the default. */
+function fallbackListFor(cls: string, filePath: string): string[] | undefined {
 	const overrides = loadModelFallbackOverrides(filePath);
 	if (Object.hasOwn(overrides, cls)) return overrides[cls];
 	return Object.hasOwn(DEFAULT_MODEL_FALLBACKS, cls) ? DEFAULT_MODEL_FALLBACKS[cls as ModelClass] : undefined;
+}
+
+/** Resolve the fallback list for a model id: its class's list from
+ *  `pipeline.modelFallbacks`, else the class's default. If
+ *  `pipeline.modelClasses` names a class with no list (a typo, say), the
+ *  built-in class still applies. Undefined if the model has no class with a
+ *  list. */
+export function fallbacksFor(modelId: string | undefined, filePath: string = DEFAULT_SETTINGS_PATH): string[] | undefined {
+	const cls = modelClassFor(modelId, filePath);
+	if (!cls) return undefined;
+	const list = fallbackListFor(cls, filePath);
+	if (list) return list;
+	const builtIn = modelId ? lookupModelId(PRIMARY_TO_CLASS, modelId) : undefined;
+	return builtIn && builtIn !== cls ? fallbackListFor(builtIn, filePath) : undefined;
 }
 
 // OpenRouter caps the `models` array at 3 entries per request; more returns
@@ -538,18 +548,36 @@ export function fallbacksFor(modelId: string | undefined, filePath: string = DEF
 // `pipeline.modelFallbacks` list may be longer, so the injector slices.
 export const OPENROUTER_MAX_MODELS = 3;
 
+const bareModelId = (id: string): string => id.replace(/^openrouter\//, "");
+
 /** The provider payload with OpenRouter's `models` fallback array added for
  *  its `model`, or undefined to leave the payload as it is: no string
- *  `model`, a `models` array already set, or no fallbacks for the model.
- *  The `before_provider_request` hook in extension.ts returns this. */
-export function withModelFallbacks(payload: unknown, filePath: string = DEFAULT_SETTINGS_PATH): Record<string, unknown> | undefined {
+ *  `model`, a `models` or `fallbacks` array already set (OpenRouter rejects
+ *  both together), no fallbacks for the model, or `current` says the request
+ *  goes to a provider other than OpenRouter. The array holds the class's list
+ *  without the `openrouter/` prefix and without the request's own model
+ *  (OpenRouter tries `model` first anyway), cut to OpenRouter's cap.
+ *  The `before_provider_request` hook in extension.ts returns this, passing
+ *  the session's current model as `current`. */
+export function withModelFallbacks(
+	payload: unknown,
+	filePath: string = DEFAULT_SETTINGS_PATH,
+	current?: { id: string; provider: string },
+): Record<string, unknown> | undefined {
 	if (!payload || typeof payload !== "object") return undefined;
 	const p = payload as Record<string, unknown>;
 	const model = p["model"];
 	if (typeof model !== "string") return undefined;
-	if (Array.isArray(p["models"]) && p["models"].length > 0) return undefined;
-	const chain = fallbacksFor(model, filePath);
-	if (!chain || chain.length === 0) return undefined;
+	if (current && current.id === model && current.provider !== "openrouter") return undefined;
+	for (const key of ["models", "fallbacks"]) {
+		const v = p[key];
+		if (Array.isArray(v) && v.length > 0) return undefined;
+	}
+	const primary = bareModelId(model);
+	const chain = (fallbacksFor(model, filePath) ?? [])
+		.map(bareModelId)
+		.filter((id, i, all) => id !== primary && all.indexOf(id) === i);
+	if (chain.length === 0) return undefined;
 	return { ...p, models: chain.slice(0, OPENROUTER_MAX_MODELS) };
 }
 

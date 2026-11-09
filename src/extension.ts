@@ -337,8 +337,10 @@ pi.on("session_start", (_event, ctx) => {
 
 // 1b. Model fallback: inject OpenRouter's native `models` array so the
 // server falls through on rate-limits/downtime (see DEFAULT_MODEL_FALLBACKS
-// and withModelFallbacks in lib.ts).
-pi.on("before_provider_request", (event) => withModelFallbacks(event.payload));
+// and withModelFallbacks in lib.ts). The current model's provider keeps the
+// OpenRouter-only field off requests to other providers.
+pi.on("before_provider_request", (event, ctx) =>
+	withModelFallbacks(event.payload, undefined, ctx.model ? { id: ctx.model.id, provider: ctx.model.provider } : undefined));
 
 // The dead `subagent`/`Agent` event hooks are removed. The pipeline tool
 // now owns dispatch (see Stage D); usage comes from the dispatcher, not

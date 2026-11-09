@@ -232,16 +232,15 @@ test("DEFAULT_MODEL_FALLBACKS: each class ≤3 (OpenRouter 'models' cap)", () =>
 	}
 });
 
-/** The `pipeline.modelFallbacks` block agent-tools' scripts/install writes
- *  (from config/models.yaml pi.pipeline_fallbacks). */
-const AGENT_TOOLS_FALLBACKS = {
+/** A sample `pipeline.modelFallbacks` block, as a config tool might write it. */
+const SAMPLE_FALLBACKS = {
 	utility: ["minimax/minimax-m3", "~z-ai/glm-flash-latest", "~deepseek/deepseek-v4-flash-latest"],
 	coding: ["~z-ai/glm-latest", "~openai/gpt-luna-latest", "~deepseek/deepseek-v4-flash-latest"],
 	stronger: ["~anthropic/claude-sonnet-latest", "~openai/gpt-terra-latest", "~anthropic/claude-opus-latest"],
 };
 
 test("fallbacksFor: OpenRouter -latest aliases have built-in classes", () => {
-	const f = fixtureSettings({ pipeline: { modelFallbacks: AGENT_TOOLS_FALLBACKS } });
+	const f = fixtureSettings({ pipeline: { modelFallbacks: SAMPLE_FALLBACKS } });
 	// The models agent-tools assigns to agents, as payload.model carries them
 	// (bare) and as settings.json writes them (openrouter/ prefix).
 	for (const [model, cls] of [
@@ -258,13 +257,13 @@ test("fallbacksFor: OpenRouter -latest aliases have built-in classes", () => {
 		["~openai/gpt-sol-latest", "stronger"],
 	] as const) {
 		assert.equal(modelClassFor(model, f), cls, model);
-		assert.deepEqual(fallbacksFor(model, f), AGENT_TOOLS_FALLBACKS[cls], model);
+		assert.deepEqual(fallbacksFor(model, f), SAMPLE_FALLBACKS[cls], model);
 	}
 });
 
 test("modelClassFor: pipeline.modelClasses names a model's class and wins over the built-in", () => {
 	const f = fixtureSettings({ pipeline: {
-		modelFallbacks: { ...AGENT_TOOLS_FALLBACKS, vision: ["~google/gemini-pro-latest", "~openai/gpt-terra-latest"] },
+		modelFallbacks: { ...SAMPLE_FALLBACKS, vision: ["~google/gemini-pro-latest", "~openai/gpt-terra-latest"] },
 		modelClasses: {
 			"openrouter/~x-ai/grok-latest": "stronger",   // prefixed key, bare payload id
 			"~moonshotai/kimi-latest": "coding",          // bare key
@@ -288,7 +287,7 @@ test("modelClassFor: pipeline.modelClasses names a model's class and wins over t
 	assert.equal(modelClassFor("openrouter/~moonshotai/kimi-latest", f), "coding");
 	assert.equal(modelClassFor("~z-ai/glm-latest", f), "stronger");
 	assert.equal(modelClassFor("openrouter/free", f), "utility");
-	assert.deepEqual(fallbacksFor("~x-ai/grok-latest", f), AGENT_TOOLS_FALLBACKS.stronger);
+	assert.deepEqual(fallbacksFor("~x-ai/grok-latest", f), SAMPLE_FALLBACKS.stronger);
 	assert.deepEqual(fallbacksFor("~google/gemini-pro-latest", f), ["~google/gemini-pro-latest", "~openai/gpt-terra-latest"]);
 	// A class with no list in settings or defaults gives no fallbacks.
 	assert.equal(fallbacksFor("some/model-without-list", f), undefined);
@@ -302,22 +301,52 @@ test("modelClassFor: a class from modelClasses uses the default list when modelF
 	assert.deepEqual(fallbacksFor("~x-ai/grok-latest", f), DEFAULT_MODEL_FALLBACKS.coding);
 });
 
+test("fallbacksFor: a modelClasses class with no list keeps the built-in class's list", () => {
+	const f = fixtureSettings({ pipeline: {
+		modelFallbacks: SAMPLE_FALLBACKS,
+		modelClasses: { "~z-ai/glm-latest": "strong" }, // typo for "stronger"
+	} });
+	assert.equal(modelClassFor("~z-ai/glm-latest", f), "strong");
+	assert.deepEqual(fallbacksFor("~z-ai/glm-latest", f), SAMPLE_FALLBACKS.coding);
+});
+
 test("withModelFallbacks: injects the class's models array into an OpenRouter request", () => {
-	const f = fixtureSettings({ pipeline: { modelFallbacks: AGENT_TOOLS_FALLBACKS } });
+	const f = fixtureSettings({ pipeline: { modelFallbacks: SAMPLE_FALLBACKS } });
 	const payload = { model: "~z-ai/glm-latest", messages: [{ role: "user", content: "hi" }], stream: true };
 	const out = withModelFallbacks(payload, f);
-	assert.deepEqual(out, { ...payload, models: AGENT_TOOLS_FALLBACKS.coding });
+	// The request's own model is left out of `models`: OpenRouter tries it first anyway.
+	assert.deepEqual(out, { ...payload, models: ["~openai/gpt-luna-latest", "~deepseek/deepseek-v4-flash-latest"] });
 	assert.equal(payload.hasOwnProperty("models"), false, "input payload is not mutated");
-	assert.deepEqual(withModelFallbacks({ model: "~anthropic/claude-sonnet-latest" }, f)?.models, AGENT_TOOLS_FALLBACKS.stronger);
-	assert.deepEqual(withModelFallbacks({ model: "minimax/minimax-m3" }, f)?.models, AGENT_TOOLS_FALLBACKS.utility);
+	assert.deepEqual(withModelFallbacks({ model: "~anthropic/claude-sonnet-latest" }, f)?.models,
+		["~openai/gpt-terra-latest", "~anthropic/claude-opus-latest"]);
+	assert.deepEqual(withModelFallbacks({ model: "openrouter/minimax/minimax-m3" }, f)?.models,
+		["~z-ai/glm-flash-latest", "~deepseek/deepseek-v4-flash-latest"]);
+	// A model of the class that isn't first in its list keeps the others.
+	assert.deepEqual(withModelFallbacks({ model: "~openai/gpt-luna-latest" }, f)?.models,
+		["~z-ai/glm-latest", "~deepseek/deepseek-v4-flash-latest"]);
+	// The session's model on OpenRouter does not stop the injection.
+	assert.ok(withModelFallbacks({ model: "~z-ai/glm-latest" }, f, { id: "~z-ai/glm-latest", provider: "openrouter" })?.models);
+});
+
+test("withModelFallbacks: strips the openrouter/ prefix and duplicates from settings lists", () => {
+	const f = fixtureSettings({ pipeline: { modelFallbacks: {
+		coding: ["openrouter/~z-ai/glm-latest", "openrouter/a/1", "a/1", "a/2", "a/3", "a/4"],
+	} } });
+	assert.deepEqual(withModelFallbacks({ model: "~z-ai/glm-latest" }, f)?.models, ["a/1", "a/2", "a/3"]);
 });
 
 test("withModelFallbacks: leaves the payload alone when it cannot or should not add fallbacks", () => {
-	const f = fixtureSettings({ pipeline: { modelFallbacks: AGENT_TOOLS_FALLBACKS } });
+	const f = fixtureSettings({ pipeline: { modelFallbacks: SAMPLE_FALLBACKS } });
 	assert.equal(withModelFallbacks(undefined, f), undefined);
 	assert.equal(withModelFallbacks({ messages: [] }, f), undefined);
 	assert.equal(withModelFallbacks({ model: "some/unknown-model" }, f), undefined);
 	assert.equal(withModelFallbacks({ model: "~z-ai/glm-latest", models: ["a/b"] }, f), undefined, "a caller's own models array wins");
+	assert.equal(withModelFallbacks({ model: "~anthropic/claude-sonnet-latest", fallbacks: [{ model: "a/b" }] }, f), undefined,
+		"OpenRouter rejects `models` together with `fallbacks`");
+	assert.equal(withModelFallbacks({ model: "minimax/minimax-m3" }, f, { id: "minimax/minimax-m3", provider: "my-gateway" }), undefined,
+		"a request to another provider gets no OpenRouter field");
+	const onlySelf = fixtureSettings({ pipeline: { modelFallbacks: { coding: ["~z-ai/glm-latest"] } } });
+	assert.equal(withModelFallbacks({ model: "~z-ai/glm-latest" }, onlySelf), undefined, "a list of only the primary adds nothing");
 });
 
 test("withModelFallbacks: slices a long settings list to OpenRouter's cap", () => {

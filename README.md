@@ -92,17 +92,21 @@ downtime, moderation or context-length errors
 The class of the request's model chooses the list:
 
 - `pipeline.modelFallbacks` maps a class to its list of OpenRouter model ids,
-  without the `openrouter/` prefix. OpenRouter accepts at most 3, so longer lists
-  are cut to the first 3. A class you leave out keeps the package default
-  (`DEFAULT_MODEL_FALLBACKS` in [`src/lib.ts`](src/lib.ts)).
+  with or without the `openrouter/` prefix. The request's own model is left out
+  of the array, since OpenRouter tries it first anyway. OpenRouter accepts at
+  most 3, so the rest is cut to the first 3. A class you leave out keeps the
+  package default (`DEFAULT_MODEL_FALLBACKS` in [`src/lib.ts`](src/lib.ts)).
 - `pipeline.modelClasses` maps a model id, with or without the `openrouter/`
   prefix, to its class. It wins over the package's built-in map
   (`PRIMARY_TO_CLASS` in [`src/lib.ts`](src/lib.ts)), which covers the default
   models and the current `~…-latest` aliases. It may name a class that only
-  `pipeline.modelFallbacks` defines.
+  `pipeline.modelFallbacks` defines. If it names a class with no list, the
+  built-in class still applies.
 
-A model with no class gets no `models` array. Both keys are read once per load,
-so run `/reload` in pi after changing them.
+A model with no class gets no `models` array, and neither does a request that
+already carries `models` or `fallbacks`, or one for the session's model when
+that model's provider is not OpenRouter. Both keys are read once per load, so
+run `/reload` in pi after changing them.
 
 ---
 
