@@ -33,8 +33,7 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "config",
-    "scripts"
+    "config"
   ],
   "pi": {
     "extensions": [
@@ -53,11 +52,10 @@
     ]
   },
   "scripts": {
+    "check": "npm run typecheck && npm test",
     "test": "node --test --experimental-strip-types test/*.test.ts",
     "test:verbose": "node --test --experimental-strip-types --test-reporter spec test/*.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "sync-models": "node scripts/sync-models.mjs",
-    "check-models": "node scripts/sync-models.mjs --check"
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
     "typescript": "^5"
