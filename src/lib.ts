@@ -571,7 +571,7 @@ export function withModelFallbacks(
 	if (current && current.id === model && current.provider !== "openrouter") return undefined;
 	for (const key of ["models", "fallbacks"]) {
 		const v = p[key];
-		if (Array.isArray(v) && v.length > 0) return undefined;
+		if (Array.isArray(v)) return undefined;
 	}
 	const primary = bareModelId(model);
 	const chain = (fallbacksFor(model, filePath) ?? [])
