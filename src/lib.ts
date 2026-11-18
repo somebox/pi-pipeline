@@ -548,7 +548,7 @@ export function fallbacksFor(modelId: string | undefined, filePath: string = DEF
 // `pipeline.modelFallbacks` list may be longer, so the injector slices.
 export const OPENROUTER_MAX_MODELS = 3;
 
-const bareModelId = (id: string): string => id.replace(/^openrouter\//, "");
+const bareModelId = (id: string): string => id.replace(/^openrouter\/(?=[^/]+\/)/, "");
 
 /** The provider payload with OpenRouter's `models` fallback array added for
  *  its `model`, or undefined to leave the payload as it is: no string
